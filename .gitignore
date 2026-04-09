@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+storage/
+.pytest_cache/
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.openclaude-profile.json
+reports/
+coverage/

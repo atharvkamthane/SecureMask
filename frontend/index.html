@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SecureMask</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">SecureMask</p>
+        <h1>Protect identity documents before they leave your hands.</h1>
+      </div>
+      <img
+        class="header-image"
+        src="https://images.unsplash.com/photo-1450101499163-c8848c66ca85?auto=format&fit=crop&w=900&q=80"
+        alt="Documents and privacy review workspace"
+      />
+    </header>
+
+    <main id="main" class="app-shell">
+      <section class="scan-panel" aria-labelledby="scan-title">
+        <div class="section-heading">
+          <p class="eyebrow">Scan</p>
+          <h2 id="scan-title">Upload a document or paste extracted text</h2>
+        </div>
+
+        <form id="upload-form" class="form-grid">
+          <label>
+            Declared use case
+            <select id="context" name="context">
+              <option value="general_upload">General upload</option>
+              <option value="age_verification">Age verification</option>
+              <option value="identity_verification">Identity verification</option>
+              <option value="address_proof">Address proof</option>
+              <option value="kyc_onboarding">KYC onboarding</option>
+            </select>
+          </label>
+
+          <label>
+            Identity document
+            <input id="document-file" name="file" type="file" accept=".jpg,.jpeg,.png,.pdf,image/*,application/pdf" />
+          </label>
+
+          <button type="submit" id="upload-button">Scan document</button>
+        </form>
+
+        <form id="text-form" class="text-form">
+          <label>
+            Raw text scan
+            <textarea id="raw-text" rows="8" placeholder="Paste document text for API-only testing"></textarea>
+          </label>
+          <button type="submit">Scan text</button>
+        </form>
+      </section>
+
+      <section class="results-panel" aria-labelledby="results-title">
+        <div class="section-heading">
+          <p class="eyebrow">Results</p>
+          <h2 id="results-title">Detected exposure</h2>
+        </div>
+        <div id="status" class="status" role="status">No scan yet.</div>
+        <div id="summary" class="summary-grid"></div>
+        <form id="redaction-form" class="fields-list" hidden>
+          <div id="fields"></div>
+          <button type="submit">Apply redaction choices</button>
+        </form>
+        <div id="output" class="output"></div>
+      </section>
+    </main>
+
+    <section class="history-band" aria-labelledby="history-title">
+      <div class="section-heading">
+        <p class="eyebrow">Audit trail</p>
+        <h2 id="history-title">Recent scans</h2>
+      </div>
+      <div id="history" class="history-list"></div>
+    </section>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
