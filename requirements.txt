@@ -9,3 +9,4 @@ numpy>=1.26.0
 pdf2image>=1.17.0
 pyzbar>=0.1.9
 spacy>=3.7.0
+easyocr>=1.7.2
