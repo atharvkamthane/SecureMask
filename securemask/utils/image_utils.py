@@ -1,52 +1,36 @@
+"""Image utility helpers."""
 from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageOps
+import cv2
+import numpy as np
+from PIL import Image
 
 
 def load_image(path: str | Path) -> Image.Image:
+    """Load an image from disk as a PIL Image."""
     return Image.open(path).convert("RGB")
 
 
-def preprocess_for_ocr(image: Image.Image) -> Image.Image:
-    import cv2
-    import numpy as np
-
-    gray = ImageOps.grayscale(image)
-    arr = np.array(gray)
-    arr = cv2.bilateralFilter(arr, 9, 75, 75)
-    arr = cv2.adaptiveThreshold(arr, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11)
-    return Image.fromarray(arr)
+def pil_to_cv(image: Image.Image) -> np.ndarray:
+    """Convert PIL Image to OpenCV BGR array."""
+    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
-def pdf_to_image(pdf_path: str | Path, output_path: str | Path) -> Path:
-    from pdf2image import convert_from_path
+def cv_to_pil(image: np.ndarray) -> Image.Image:
+    """Convert OpenCV BGR array to PIL Image."""
+    return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
-    pages = convert_from_path(str(pdf_path), first_page=1, last_page=1)
-    if not pages:
-        raise ValueError("PDF did not contain any pages")
-    output = Path(output_path)
-    pages[0].convert("RGB").save(output, "PNG")
+
+def ensure_processable_image(path: str | Path, output_dir: str | Path) -> Path:
+    """Ensure image is readable and save a processable copy.
+
+    No upscaling — saves at original resolution to preserve coordinate alignment.
+    """
+    path = Path(path)
+    output = Path(output_dir) / "processable.png"
+    img = Image.open(path).convert("RGB")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    img.save(output, "PNG")
     return output
-
-
-def ensure_processable_image(input_path: str | Path, output_path: str | Path) -> Path:
-    input_path = Path(input_path)
-    output_path = Path(output_path)
-    if input_path.suffix.lower() == ".pdf":
-        return pdf_to_image(input_path, output_path)
-
-    image = load_image(input_path)
-    image.save(output_path, "PNG")
-    return output_path
-
-
-def zone_bounds(zone: str, image_height: int) -> tuple[int, int]:
-    if zone == "top":
-        return 0, int(image_height * 0.4)
-    if zone == "middle":
-        return int(image_height * 0.25), int(image_height * 0.75)
-    if zone == "bottom":
-        return int(image_height * 0.6), image_height
-    return 0, image_height

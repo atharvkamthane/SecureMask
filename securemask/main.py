@@ -1,17 +1,26 @@
+"""SecureMask FastAPI application entry point."""
 from __future__ import annotations
+
+import logging
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from securemask.api.routes import router
-from securemask.config import BASE_DIR, REDACTED_DIR, STATIC_DIR, ensure_storage_dirs
+from securemask.config import PROCESSED_DIR, REDACTED_DIR, UPLOAD_DIR, ensure_storage_dirs
 from securemask.db.database import init_db
 
+logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="SecureMask", version="1.0.0")
+app = FastAPI(
+    title="SecureMask API",
+    description="Document privacy protection system — PII detection, classification, and redaction",
+    version="2.0.0",
+)
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,23 +29,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Init
 ensure_storage_dirs()
 init_db()
+
+# Static file serving for document images
+app.mount("/files/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+app.mount("/files/processed", StaticFiles(directory=str(PROCESSED_DIR)), name="processed")
+app.mount("/files/redacted", StaticFiles(directory=str(REDACTED_DIR)), name="redacted")
+
+# API routes
 app.include_router(router)
-app.mount("/files/redacted", StaticFiles(directory=REDACTED_DIR), name="redacted-files")
-
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
-@app.get("/")
-async def index():
-    index_path = STATIC_DIR / "index.html"
-    if index_path.exists():
-        return FileResponse(index_path)
-    return {"name": "SecureMask", "docs": "/docs"}
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "storage": str(BASE_DIR / "storage")}

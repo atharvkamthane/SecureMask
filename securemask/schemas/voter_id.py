@@ -1,16 +1,54 @@
-from securemask.config import FieldSchema
+"""Voter ID (EPIC) field schema."""
+from securemask.schemas.base import FieldSchema
 
-DOCUMENT_KEYWORDS = [
-    "election commission", "epic", "elector", "voter",
-    "assembly constituency", "parliamentary constituency",
-]
-
-FIELDS = [
-    FieldSchema("epic_number", 9, r"\b[A-Z]{3}[0-9]{7}\b", ["epic no", "elector", "voter id", "election commission"], "top", regex_description="EPIC voter identifier"),
-    FieldSchema("name", 5, None, ["elector's name", "name"], "middle", regex_description="person name"),
-    FieldSchema("father_husband_name", 4, None, ["father", "husband", "relation"], "middle", regex_description="relation name"),
-    FieldSchema("dob", 4, r"\b(0?[1-9]|[12][0-9]|3[01])[\/\-](0?[1-9]|1[012])[\/\-]\d{4}\b", ["date of birth", "dob", "age"], "middle", regex_description="date of birth"),
-    FieldSchema("gender", 2, r"\b(male|female|others)\b", ["gender", "sex"], "middle", regex_description="gender marker"),
-    FieldSchema("address", 7, None, ["address", "constituency", "part no", "serial no"], "bottom", regex_description="address text"),
-    FieldSchema("assembly_constituency", 3, None, ["assembly constituency", "ac name", "parliamentary"], "bottom", regex_description="constituency name"),
+fields = [
+    FieldSchema(
+        field_name="epic_number",
+        sensitivity_weight=9,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"\b[A-Z]{3}[0-9]{7}\b",
+        fuzzy_threshold=80,
+        anchor_keywords=["epic no", "elector", "voter id",
+                         "election commission", "epic"],
+        zone="top",
+    ),
+    FieldSchema(
+        field_name="name",
+        sensitivity_weight=5,
+        extraction_method="ner",
+        anchor_keywords=["elector's name", "name", "नाम"],
+        zone="middle",
+    ),
+    FieldSchema(
+        field_name="father_husband_name",
+        sensitivity_weight=4,
+        extraction_method="ner",
+        anchor_keywords=["father", "husband", "relation", "पिता", "पति"],
+        zone="middle",
+    ),
+    FieldSchema(
+        field_name="dob",
+        sensitivity_weight=4,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"\b(0?[1-9]|[12]\d|3[01])[\/\-](0?[1-9]|1[012])[\/\-]\d{4}\b",
+        fuzzy_threshold=80,
+        anchor_keywords=["date of birth", "dob", "age", "जन्म"],
+        zone="middle",
+    ),
+    FieldSchema(
+        field_name="gender",
+        sensitivity_weight=2,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"\b(male|female|others|पुरुष|महिला)\b",
+        fuzzy_threshold=75,
+        anchor_keywords=["gender", "sex", "लिंग"],
+        zone="middle",
+    ),
+    FieldSchema(
+        field_name="address",
+        sensitivity_weight=7,
+        extraction_method="ner",
+        anchor_keywords=["address", "constituency", "part no", "पता", "विधान सभा"],
+        zone="bottom",
+    ),
 ]

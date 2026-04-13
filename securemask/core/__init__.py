@@ -1,1 +1,1 @@
-"""SecureMask processing pipeline."""
+"""Core module — OCR, classification, extraction, redaction, PEI."""

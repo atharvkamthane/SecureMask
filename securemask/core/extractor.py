@@ -1,168 +1,249 @@
+"""Field extraction coordinator.
+
+Routes each field to QR → MRZ → regex_fuzzy → NER based on extraction_method.
+Handles all 5 document types with QR/MRZ special paths.
+"""
 from __future__ import annotations
 
+import logging
 import re
-from functools import lru_cache
 
+import cv2
+import numpy as np
 from PIL import Image
 
-from securemask.config import FieldSchema, UNIVERSAL_REGEX_PATTERNS
-from securemask.core.explainer import explain_field
-from securemask.core.ocr import OCRResult, OCRWord
+from securemask.core.fuzzy_regex import FuzzyRegexExtractor
+from securemask.core.mrz import MRZParser
+from securemask.core.ner import NERExtractor
+from securemask.core.ocr import OCRResult
+from securemask.core.qr import QRDecoder
 from securemask.models.detected_field import BoundingBox, DetectedField
-from securemask.schemas import SCHEMA_MODULES
-from securemask.utils.image_utils import zone_bounds
-from securemask.utils.qr_utils import detect_qr_codes
+from securemask.schemas import get_schema
+
+logger = logging.getLogger(__name__)
+
+# Singletons
+_fuzzy = FuzzyRegexExtractor()
+_ner = NERExtractor()
+_mrz = MRZParser()
+_qr = QRDecoder()
 
 
-@lru_cache(maxsize=1)
-def _load_spacy_model():
+def _normalize_bbox_pct(box: BoundingBox, w: int, h: int) -> BoundingBox:
+    if w <= 0 or h <= 0:
+        return box
+    return BoundingBox(
+        x=round(box.x / w * 100, 2),
+        y=round(box.y / h * 100, 2),
+        width=round(box.width / w * 100, 2),
+        height=round(box.height / h * 100, 2),
+    )
+
+
+def _detect_photo_region(image_path: str) -> BoundingBox | None:
+    """Detect face region using OpenCV Haar cascade."""
     try:
-        import spacy
-
-        return spacy.load("en_core_web_sm")
-    except Exception:
-        try:
-            import spacy
-
-            return spacy.blank("en")
-        except Exception:
+        img = cv2.imread(str(image_path))
+        if img is None:
             return None
-
-
-def _combine_boxes(words: list[OCRWord]) -> BoundingBox:
-    if not words:
-        return BoundingBox(0, 0, 1, 1)
-    left = min(word.box.x for word in words)
-    top = min(word.box.y for word in words)
-    right = max(word.box.x + word.box.width for word in words)
-    bottom = max(word.box.y + word.box.height for word in words)
-    return BoundingBox(left, top, right - left, bottom - top)
-
-
-def _words_in_zone(words: list[OCRWord], zone: str, image_height: int) -> list[OCRWord]:
-    y_min, y_max = zone_bounds(zone, image_height)
-    return [word for word in words if y_min <= word.box.y <= y_max]
-
-
-def _bbox_for_value(value: str, words: list[OCRWord], zone: str, image_height: int) -> BoundingBox:
-    zone_words = _words_in_zone(words, zone, image_height)
-    value_parts = [part.lower() for part in re.findall(r"\w+", value)]
-    compact_value = re.sub(r"\W+", "", value).lower()
-    if value_parts:
-        matched = [
-            word
-            for word in zone_words
-            if re.sub(r"\W+", "", word.text).lower() in value_parts
-            or re.sub(r"\W+", "", word.text).lower() == compact_value
-        ]
-        if matched:
-            return _combine_boxes(matched[: max(len(value_parts), 1)])
-    if zone_words:
-        return _combine_boxes(zone_words[: min(8, len(zone_words))])
-    all_matched = [
-        word
-        for word in words
-        if re.sub(r"\W+", "", word.text).lower() in value_parts
-        or re.sub(r"\W+", "", word.text).lower() == compact_value
-    ]
-    if all_matched:
-        return _combine_boxes(all_matched[: max(len(value_parts), 1)])
-    return BoundingBox(0, 0, 1, 1)
-
-
-def _keyword_anchor_value(schema: FieldSchema, words: list[OCRWord], image_height: int) -> tuple[str, BoundingBox, str] | None:
-    zone_words = _words_in_zone(words, schema.zone, image_height)
-    lowered = [word.text.lower().strip(":") for word in zone_words]
-    for keyword in schema.keywords:
-        parts = keyword.lower().split()
-        for index in range(len(lowered)):
-            if lowered[index : index + len(parts)] == parts:
-                value_words = zone_words[index + len(parts) : index + len(parts) + 5]
-                value_words = [word for word in value_words if word.text.strip(":").lower() not in {"name", "dob", "date", "of", "birth"}]
-                if value_words:
-                    value = " ".join(word.text for word in value_words)
-                    return value, _combine_boxes(value_words), keyword
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+        if len(faces) > 0:
+            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+            pad = int(w * 0.3)
+            return BoundingBox(
+                max(0, x - pad), max(0, y - pad),
+                min(img.shape[1], w + 2 * pad),
+                min(img.shape[0], h + 2 * pad),
+            )
+    except Exception:
+        pass
     return None
 
 
-def _ner_fields(text: str, words: list[OCRWord], image_height: int, schema: FieldSchema, document_type: str) -> list[DetectedField]:
-    fields: list[DetectedField] = []
-    model = _load_spacy_model()
-    if model is not None and getattr(model, "pipe_names", []):
-        doc = model(text)
-        label_map = {"PERSON": "name", "GPE": "address", "LOC": "address", "ORG": "employer_name"}
-        for entity in doc.ents:
-            target = label_map.get(entity.label_)
-            if target and (schema.field_name == target or schema.field_name in {"place_of_birth", "place_of_issue", "dispensary", "family_members", "head_of_family_name", "father_name", "father_husband_name", "father_name_spouse_name", "employer_name"}):
-                field = DetectedField(schema.field_name, entity.text, schema.sensitivity_weight, "ner", 0.72, _bbox_for_value(entity.text, words, schema.zone, image_height), metadata={"entity_type": entity.label_})
-                field.explanation = explain_field(field, document_type, schema)
-                fields.append(field)
-                break
-    if fields:
-        return fields
-    anchored = _keyword_anchor_value(schema, words, image_height)
-    if anchored:
-        value, box, keyword = anchored
-        field = DetectedField(schema.field_name, value, schema.sensitivity_weight, "keyword_anchor", 0.62, box, metadata={"matched_keyword": keyword})
-        field.explanation = explain_field(field, document_type, schema)
-        return [field]
-    return []
+class FieldExtractor:
+    """Coordinate field extraction across QR, MRZ, regex, and NER engines."""
 
+    def extract(self, ocr_result: OCRResult, image: Image.Image,
+                document_type: str, image_path: str | None = None) -> list[DetectedField]:
+        schema_fields = get_schema(document_type)
+        if not schema_fields:
+            return self._extract_unknown(ocr_result)
 
-def extract_fields(document_type: str, ocr: OCRResult, image_path: str | None = None) -> list[DetectedField]:
-    if document_type == "unknown":
-        return extract_unknown_fields(ocr)
-    module = SCHEMA_MODULES[document_type]
-    fields: list[DetectedField] = []
-    seen: set[tuple[str, str]] = set()
-    for schema in module.FIELDS:
-        if schema.regex:
-            zone_text = " ".join(word.text for word in _words_in_zone(ocr.words, schema.zone, ocr.image_height))
-            haystack = ocr.text if schema.zone == "anywhere" else zone_text or ocr.text
-            flags = re.IGNORECASE if schema.field_name in {"gender", "nationality", "category", "vehicle_class", "blood_group"} else 0
-            for match in re.finditer(schema.regex, haystack, flags):
-                value = match.group(0)
-                key = (schema.field_name, value.lower())
-                if key in seen:
+        # Pre-compute special decoders
+        qr_data = None
+        mrz_data = None
+
+        if document_type == "aadhaar":
+            qr_data = _qr.decode(image)
+            if qr_data:
+                logger.info("Aadhaar QR decoded successfully")
+
+        if document_type == "passport":
+            mrz_data = _mrz.parse(image_path=image_path, ocr_text=ocr_result.full_text)
+            if mrz_data:
+                logger.info("Passport MRZ decoded successfully")
+
+        results: list[DetectedField] = []
+        seen: set[str] = set()
+
+        for schema in schema_fields:
+            if schema.field_name in seen:
+                continue
+
+            detected = self._extract_field(
+                schema, ocr_result, image, image_path,
+                qr_data, mrz_data,
+            )
+            if detected:
+                results.append(detected)
+                seen.add(schema.field_name)
+
+        # Normalize bounding boxes to percentages
+        for field in results:
+            field.bounding_box_pct = _normalize_bbox_pct(
+                field.bounding_box, ocr_result.image_width, ocr_result.image_height
+            )
+
+        return results
+
+    def _extract_field(self, schema, ocr_result, image, image_path,
+                       qr_data=None, mrz_data=None) -> DetectedField | None:
+        value = None
+        confidence = 0.0
+        method_used = "unknown"
+        bbox = BoundingBox(0, 0, 1, 1)
+
+        method = schema.extraction_method
+
+        # 1. QR decode path (Aadhaar)
+        if "qr_primary" in method and qr_data:
+            value = qr_data.get(schema.field_name)
+            if value:
+                confidence = 0.98
+                method_used = "qr"
+                # QR doesn't have per-field bbox — use full text search
+                bbox = self._find_bbox_in_words(value, ocr_result.words)
+
+        # 2. MRZ decode path (Passport)
+        if not value and "mrz_primary" in method and mrz_data:
+            value = mrz_data.get(schema.field_name)
+            if value:
+                confidence = 0.95
+                method_used = "mrz"
+                bbox = self._find_bbox_in_words(value, ocr_result.words)
+
+        # 3. Regex + fuzzy path
+        if not value and schema.regex_pattern:
+            val, conf, box = _fuzzy.extract(
+                ocr_result.full_text,
+                schema.regex_pattern,
+                schema.fuzzy_threshold,
+                ocr_result.words,
+                schema.anchor_keywords,
+            )
+            if val:
+                value = val
+                confidence = conf
+                method_used = "regex_fuzzy"
+                bbox = box or bbox
+
+        # 4. NER path (names, addresses)
+        if not value and "ner" in method:
+            val, conf, box = _ner.extract(
+                ocr_result.full_text,
+                schema.field_name,
+                ocr_result.words,
+                schema.anchor_keywords,
+            )
+            if val:
+                value = val
+                confidence = conf
+                method_used = "ner"
+                bbox = box or bbox
+
+        # 5. Image detection path (QR regions, signatures, photos)
+        if not value and method == "image":
+            if schema.field_name == "qr_code":
+                qr_boxes = _qr.detect_qr_regions(image)
+                if qr_boxes:
+                    value = "QR_CODE"
+                    confidence = 0.95
+                    method_used = "image"
+                    bbox = qr_boxes[0]
+            elif schema.field_name == "signature":
+                # Signature is typically in bottom-right
+                h, w = ocr_result.image_height, ocr_result.image_width
+                value = "SIGNATURE_REGION"
+                confidence = 0.60
+                method_used = "image"
+                bbox = BoundingBox(int(w * 0.05), int(h * 0.75), int(w * 0.4), int(h * 0.2))
+            elif schema.field_name == "photo":
+                if image_path:
+                    photo_box = _detect_photo_region(image_path)
+                    if photo_box:
+                        value = "PHOTO_REGION"
+                        confidence = 0.85
+                        method_used = "image"
+                        bbox = photo_box
+
+        if not value:
+            return None
+
+        return DetectedField(
+            field_name=schema.field_name,
+            field_value=value,
+            sensitivity_weight=schema.sensitivity_weight,
+            detection_method=method_used,
+            confidence=confidence,
+            bounding_box=bbox,
+            always_redact=schema.always_redact,
+        )
+
+    def _extract_unknown(self, ocr_result: OCRResult) -> list[DetectedField]:
+        """Full NER fallback for unknown documents."""
+        from securemask.config import UNIVERSAL_REGEX_PATTERNS
+        fields: list[DetectedField] = []
+        seen: set[str] = set()
+
+        # Universal regex patterns
+        for name, (pattern, weight, desc) in UNIVERSAL_REGEX_PATTERNS.items():
+            for match in re.finditer(pattern, ocr_result.full_text, re.IGNORECASE):
+                val = match.group()
+                if val.lower() in seen:
                     continue
-                field = DetectedField(schema.field_name, value, schema.sensitivity_weight, "regex", 0.9, _bbox_for_value(value, ocr.words, schema.zone, ocr.image_height))
-                field.explanation = explain_field(field, document_type, schema)
-                fields.append(field)
-                seen.add(key)
+                seen.add(val.lower())
+                bbox = self._find_bbox_in_words(val, ocr_result.words)
+                fields.append(DetectedField(
+                    field_name=name, field_value=val,
+                    sensitivity_weight=weight, detection_method="regex_fuzzy",
+                    confidence=0.85, bounding_box=bbox,
+                ))
                 break
-        elif schema.field_name == "qr_code" and image_path:
-            image = Image.open(image_path).convert("RGB")
-            for box in detect_qr_codes(image):
-                field = DetectedField("qr_code", "QR_CODE", schema.sensitivity_weight, "image", 0.88, box)
-                field.explanation = explain_field(field, document_type, schema)
-                fields.append(field)
-        elif schema.field_name == "signature":
-            anchored = _keyword_anchor_value(schema, ocr.words, ocr.image_height)
-            if anchored:
-                _, box, _ = anchored
-                y = max(box.y, int(ocr.image_height * 0.65))
-                sig_box = BoundingBox(max(0, box.x - 20), y, max(160, int(ocr.image_width * 0.35)), max(40, int(ocr.image_height * 0.12)))
-                field = DetectedField("signature", "SIGNATURE_REGION", schema.sensitivity_weight, "image", 0.7, sig_box)
-                field.explanation = explain_field(field, document_type, schema)
-                fields.append(field)
-        else:
-            fields.extend(_ner_fields(ocr.text, ocr.words, ocr.image_height, schema, document_type))
-    return fields
 
+        # NER on full text
+        for field_name, target_type in [("name", "PER"), ("address", "LOC")]:
+            val, conf, bbox = _ner.extract(
+                ocr_result.full_text, field_name, ocr_result.words, []
+            )
+            if val and val.lower() not in seen:
+                seen.add(val.lower())
+                fields.append(DetectedField(
+                    field_name=field_name, field_value=val,
+                    sensitivity_weight=5, detection_method="ner",
+                    confidence=conf, bounding_box=bbox or BoundingBox(0, 0, 1, 1),
+                ))
 
-def extract_unknown_fields(ocr: OCRResult) -> list[DetectedField]:
-    fields: list[DetectedField] = []
-    for name, (pattern, weight, description) in UNIVERSAL_REGEX_PATTERNS.items():
-        for match in re.finditer(pattern, ocr.text, re.IGNORECASE if "pattern" not in name else 0):
-            field = DetectedField(name, match.group(0), weight, "regex", 0.85, _bbox_for_value(match.group(0), ocr.words, "anywhere", ocr.image_height))
-            field.explanation = f"{name} detected because the value '{field.field_value}' matches the universal {description}."
-            fields.append(field)
-    model = _load_spacy_model()
-    if model is not None and getattr(model, "pipe_names", []):
-        weights = {"PERSON": 5, "GPE": 5, "LOC": 5, "ORG": 3}
-        for entity in model(ocr.text).ents:
-            if entity.label_ in weights:
-                field = DetectedField(entity.label_.lower(), entity.text, weights[entity.label_], "ner", 0.7, _bbox_for_value(entity.text, ocr.words, "anywhere", ocr.image_height), metadata={"entity_type": entity.label_})
-                field.explanation = explain_field(field, "unknown")
-                fields.append(field)
-    return fields
+        return fields
+
+    def _find_bbox_in_words(self, value: str, words) -> BoundingBox:
+        value_parts = set(re.findall(r"\w+", value.lower()))
+        matched = [w for w in words if re.sub(r"\W+", "", w.text).lower() in value_parts]
+        if matched:
+            left = min(w.bbox.x for w in matched)
+            top = min(w.bbox.y for w in matched)
+            right = max(w.bbox.x + w.bbox.width for w in matched)
+            bottom = max(w.bbox.y + w.bbox.height for w in matched)
+            return BoundingBox(left, top, right - left, bottom - top)
+        return BoundingBox(0, 0, 1, 1)

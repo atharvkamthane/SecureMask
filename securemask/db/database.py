@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from securemask.config import DB_PATH, ensure_storage_dirs
+from securemask.models.scan import ScanSession
 
 
 def get_connection() -> sqlite3.Connection:
@@ -31,7 +33,38 @@ def init_db() -> None:
                 pei_after REAL,
                 redacted_file_path TEXT,
                 audit_report_json TEXT,
-                highlighted_text TEXT
+                highlighted_text TEXT,
+                needs_review_count INTEGER DEFAULT 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fields (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id TEXT NOT NULL,
+                field_name TEXT NOT NULL,
+                field_value TEXT,
+                detection_method TEXT,
+                confidence REAL,
+                needs_review BOOLEAN DEFAULT 0,
+                always_redact BOOLEAN DEFAULT 0,
+                required BOOLEAN DEFAULT 0,
+                redaction_decision TEXT DEFAULT 'redact',
+                sensitivity_weight INTEGER,
+                FOREIGN KEY (scan_id) REFERENCES scans(scan_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_data TEXT,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (scan_id) REFERENCES scans(scan_id)
             )
             """
         )

@@ -1,1 +1,2 @@
-"""SecureMask document privacy protection system."""
+"""SecureMask — document privacy protection system."""
+__version__ = "2.0.0"

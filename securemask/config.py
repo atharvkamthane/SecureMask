@@ -1,8 +1,7 @@
+"""SecureMask global configuration — paths, constants, supported contexts."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STORAGE_DIR = BASE_DIR / "storage"
@@ -12,35 +11,32 @@ REDACTED_DIR = STORAGE_DIR / "redacted"
 DB_PATH = STORAGE_DIR / "securemask.sqlite3"
 STATIC_DIR = BASE_DIR / "frontend"
 
-SUPPORTED_CONTEXTS = {
+# ML artifacts
+ML_DIR = Path(__file__).resolve().parent / "ml"
+ML_WEIGHTS_DIR = ML_DIR / "weights"
+CLASSIFIER_CHECKPOINT = ML_WEIGHTS_DIR / "classifier.pth"
+SYNTHETIC_DATA_DIR = ML_DIR / "synthetic_data"
+
+# GCP key for Vision API fallback
+GCP_CREDENTIALS_PATH = BASE_DIR / "securemask-493217-2bd77a5a45c8.json"
+
+SUPPORTED_CONTEXTS = [
     "age_verification",
     "identity_verification",
     "address_proof",
     "kyc_onboarding",
     "general_upload",
-}
+]
 
-SUPPORTED_DOCUMENT_TYPES = {
+SUPPORTED_DOCUMENT_TYPES = [
     "aadhaar",
     "pan",
-    "driving_license",
     "passport",
+    "driving_license",
     "voter_id",
-    "ration_card",
-    "esic",
-}
+]
 
-
-@dataclass(frozen=True)
-class FieldSchema:
-    field_name: str
-    sensitivity_weight: int
-    regex: str | None
-    keywords: list[str]
-    zone: str
-    note: str | None = None
-    regex_description: str | None = None
-
+CLASS_LABELS = SUPPORTED_DOCUMENT_TYPES  # index order for classifier
 
 UNIVERSAL_REGEX_PATTERNS = {
     "phone": (r"\b(\+91[\-\s]?)?[6-9]\d{9}\b", 6, "Indian mobile phone pattern"),
@@ -53,5 +49,5 @@ UNIVERSAL_REGEX_PATTERNS = {
 
 
 def ensure_storage_dirs() -> None:
-    for path in (STORAGE_DIR, UPLOAD_DIR, PROCESSED_DIR, REDACTED_DIR):
+    for path in (STORAGE_DIR, UPLOAD_DIR, PROCESSED_DIR, REDACTED_DIR, ML_WEIGHTS_DIR):
         path.mkdir(parents=True, exist_ok=True)

@@ -1,16 +1,76 @@
-from securemask.config import FieldSchema
+"""Aadhaar card field schema."""
+from securemask.schemas.base import FieldSchema
 
-DOCUMENT_KEYWORDS = [
-    "aadhaar", "uid", "uidai", "unique identification authority",
-    "government of india", "आधार", "नाम", "पता",
-]
-
-FIELDS = [
-    FieldSchema("aadhaar_number", 10, r"\b\d{4}\s?\d{4}\s?\d{4}\b", ["aadhaar", "uid", "unique identification"], "middle", regex_description="Aadhaar 12-digit number"),
-    FieldSchema("name", 5, None, ["name", "नाम"], "top", regex_description="person name"),
-    FieldSchema("dob", 4, r"\b(0?[1-9]|[12][0-9]|3[01])[\/\-](0?[1-9]|1[012])[\/\-]\d{4}\b", ["dob", "date of birth", "जन्म तिथि"], "middle", regex_description="date of birth"),
-    FieldSchema("gender", 2, r"\b(male|female|transgender|पुरुष|महिला)\b", ["gender", "sex", "लिंग"], "middle", regex_description="gender marker"),
-    FieldSchema("address", 7, None, ["address", "पता", "s/o", "w/o", "d/o", "house", "village", "district", "state", "pin"], "bottom", regex_description="address text"),
-    FieldSchema("phone", 6, r"\b(\+91[\-\s]?)?[6-9]\d{9}\b", ["mobile", "phone", "contact"], "anywhere", regex_description="Indian mobile number"),
-    FieldSchema("qr_code", 9, None, [], "bottom", note="detect QR code presence using image processing, flag for masking", regex_description="QR code"),
+fields = [
+    FieldSchema(
+        field_name="aadhaar_number",
+        sensitivity_weight=10,
+        extraction_method="qr_primary_regex_fallback",
+        regex_pattern=r"\b\d{4}\s?\d{4}\s?\d{4}\b",
+        fuzzy_threshold=85,
+        anchor_keywords=["aadhaar", "uid", "आधार", "unique"],
+        zone="middle",
+        always_redact=False,
+    ),
+    FieldSchema(
+        field_name="name",
+        sensitivity_weight=5,
+        extraction_method="qr_primary_ner_fallback",
+        regex_pattern=None,
+        fuzzy_threshold=0,
+        anchor_keywords=["name", "नाम"],
+        zone="top",
+        always_redact=False,
+    ),
+    FieldSchema(
+        field_name="dob",
+        sensitivity_weight=4,
+        extraction_method="qr_primary_regex_fallback",
+        regex_pattern=r"\b(0?[1-9]|[12]\d|3[01])[\/\-](0?[1-9]|1[012])[\/\-]\d{4}\b",
+        fuzzy_threshold=80,
+        anchor_keywords=["dob", "date of birth", "जन्म तिथि", "year of birth", "yob"],
+        zone="anywhere",
+        always_redact=False,
+    ),
+    FieldSchema(
+        field_name="gender",
+        sensitivity_weight=2,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"\b(male|female|transgender|पुरुष|महिला)\b",
+        fuzzy_threshold=75,
+        anchor_keywords=["gender", "sex", "लिंग"],
+        zone="anywhere",
+        always_redact=False,
+    ),
+    FieldSchema(
+        field_name="address",
+        sensitivity_weight=7,
+        extraction_method="qr_primary_ner_fallback",
+        regex_pattern=None,
+        fuzzy_threshold=0,
+        anchor_keywords=["address", "पता", "s/o", "w/o", "d/o",
+                         "house", "village", "dist", "pin", "state"],
+        zone="bottom",
+        always_redact=False,
+    ),
+    FieldSchema(
+        field_name="phone",
+        sensitivity_weight=6,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"\b(\+91[\-\s]?)?[6-9]\d{9}\b",
+        fuzzy_threshold=90,
+        anchor_keywords=["mobile", "phone", "contact", "mo."],
+        zone="anywhere",
+        always_redact=False,
+    ),
+    FieldSchema(
+        field_name="qr_code",
+        sensitivity_weight=9,
+        extraction_method="image",
+        regex_pattern=None,
+        fuzzy_threshold=0,
+        anchor_keywords=[],
+        zone="bottom",
+        always_redact=True,
+    ),
 ]

@@ -1,12 +1,25 @@
-from securemask.schemas import aadhaar, driving_license, esic, pan, passport, ration_card, voter_id
+"""Schema registry — maps document types to their field schemas."""
+from __future__ import annotations
+
+from securemask.schemas.base import FieldSchema
 
 
-SCHEMA_MODULES = {
-    "aadhaar": aadhaar,
-    "pan": pan,
-    "driving_license": driving_license,
-    "passport": passport,
-    "voter_id": voter_id,
-    "ration_card": ration_card,
-    "esic": esic,
-}
+def get_schema(document_type: str) -> list[FieldSchema]:
+    """Return the field schema list for a given document type."""
+    if document_type == "aadhaar":
+        from securemask.schemas.aadhaar import fields
+        return fields
+    elif document_type == "pan":
+        from securemask.schemas.pan import fields
+        return fields
+    elif document_type == "passport":
+        from securemask.schemas.passport import fields
+        return fields
+    elif document_type == "driving_license":
+        from securemask.schemas.driving_license import fields
+        return fields
+    elif document_type == "voter_id":
+        from securemask.schemas.voter_id import fields
+        return fields
+    else:
+        return []
