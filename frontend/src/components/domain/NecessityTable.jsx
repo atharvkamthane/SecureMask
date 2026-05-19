@@ -1,6 +1,6 @@
 import { Check, X } from 'lucide-react'
 
-export default function NecessityTable({ fields = [], onOverride }) {
+export default function NecessityTable({ fields = [] }) {
   return (
     <div className="bg-bg-surface border border-border rounded-[var(--r-lg)] overflow-hidden">
       <div className="grid grid-cols-[1fr_100px_90px_140px] gap-0 bg-bg-surface-2 px-4 py-2.5 border-b border-border">
@@ -29,8 +29,11 @@ export default function NecessityTable({ fields = [], onOverride }) {
             }
           </div>
           <div className="flex justify-end">
-            <span className={`text-xs ${f.required ? 'text-success' : 'text-danger'}`}>
-              {f.required ? 'allow' : 'redact'}
+            <span className={`text-xs ${
+              f.suggested_action === 'allow' ? 'text-success' : 
+              f.suggested_action === 'mask' ? 'text-warning' : 'text-danger'
+            }`}>
+              {f.suggested_action || (f.required ? 'allow' : 'redact')}
             </span>
           </div>
         </div>

@@ -1,4 +1,3 @@
-import { motion } from 'framer-motion'
 import { ImageOff } from 'lucide-react'
 
 export default function DocumentPreview({ imageUrl, fields = [], decisions = {}, hoveredField, onFieldHover }) {
@@ -34,24 +33,21 @@ export default function DocumentPreview({ imageUrl, fields = [], decisions = {},
         const color = decision === 'allow' ? 'var(--success)' : decision === 'mask' ? 'var(--warning)' : 'var(--danger)'
 
         return (
-          <motion.div
+          <div
             key={`${f.field_name}-${i}`}
-            initial={{ scale: 1 }}
-            animate={{
-              scale: isHovered ? 1.02 : 1,
-              opacity: hoveredField && !isHovered ? 0.3 : 1,
-            }}
             onMouseEnter={() => onFieldHover?.(f.field_name)}
             onMouseLeave={() => onFieldHover?.(null)}
             className="absolute border-2 rounded-sm cursor-pointer transition-opacity"
             style={{
-              left: `${x * 100}%`,
-              top: `${y * 100}%`,
-              width: `${w * 100}%`,
-              height: `${h * 100}%`,
+              left: `${x}%`,
+              top: `${y}%`,
+              width: `${w}%`,
+              height: `${h}%`,
               borderColor: color,
               backgroundColor: isHovered ? color + '20' : color + '08',
               boxShadow: isHovered ? `0 0 12px ${color}40` : 'none',
+              transform: isHovered ? 'scale(1.02)' : 'scale(1)',
+              opacity: hoveredField && !isHovered ? 0.3 : 1,
             }}
             title={`${f.field_name}: ${f.field_value || ''}`}
           >
@@ -64,7 +60,7 @@ export default function DocumentPreview({ imageUrl, fields = [], decisions = {},
                 {f.field_name}
               </div>
             )}
-          </motion.div>
+          </div>
         )
       })}
     </div>

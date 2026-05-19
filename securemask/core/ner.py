@@ -31,15 +31,45 @@ NAME_BLACKLIST = {
     "authority", "proof", "identity", "citizenship", "verification",
     "republic", "income", "tax", "department", "permanent", "account",
     "election", "commission", "transport", "passport", "driving", "licence",
-    "license", "elector", "voter", "male", "female",
-    "भारत", "सरकार", "आधार",
+    "license", "elector", "voter", "male", "female", "transgender",
+    "भारत", "सरकार", "आधार", "dob", "date", "birth", "address",
+    "gender", "sex", "signature", "photo", "qr", "code",
+    "enrolled", "aadhaar", "enrolment", "print", "printed",
+    "online", "authentication", "offline", "xml", "should",
+    "used", "not", "the", "and", "for", "from", "this",
+    "is", "of", "or", "to", "with", "at", "in", "on",
+    "no", "number", "card", "id",
 }
+
+# Words that are too generic to be a full address
+ADDRESS_MIN_WORDS = 2
+NAME_MIN_WORDS = 2
 
 
 def _is_blacklisted_name(text: str) -> bool:
+    """Check if extracted text is a document boilerplate term, not a real name."""
     words = set(re.findall(r"\w+", text.lower()))
+    if not words:
+        return True
     overlap = words & NAME_BLACKLIST
-    return len(words) > 0 and len(overlap) / len(words) > 0.3
+    # If >30% of words are blacklisted, it's not a real name
+    if len(overlap) / len(words) > 0.3:
+        return True
+    # Single-word names that are common English/Hindi words are suspicious
+    if len(words) == 1 and words.pop() in NAME_BLACKLIST:
+        return True
+    return False
+
+
+def _is_valid_address(text: str) -> bool:
+    """Check if text is a valid address (not just a country name)."""
+    words = re.findall(r"\w+", text.strip())
+    if len(words) < ADDRESS_MIN_WORDS:
+        return False
+    # "India" alone is not a valid address
+    if text.strip().lower() in ("india", "भारत", "republic of india"):
+        return False
+    return True
 
 
 @lru_cache(maxsize=1)
@@ -47,21 +77,15 @@ def _load_hf_pipeline():
     """Try loading a HuggingFace NER pipeline."""
     try:
         from transformers import pipeline
-        # Try IndicNER first
+        # Try IndicNER first from local cache. If it is unavailable, fall back
+        # to spaCy and keyword extraction instead of loading a base model with
+        # an untrained token-classification head.
         try:
             ner = pipeline("token-classification", model="ai4bharat/IndicNER",
+                           local_files_only=True,
                            aggregation_strategy="simple", device=-1)
             logger.info("Loaded ai4bharat/IndicNER model")
             return ner, "indicner"
-        except Exception:
-            pass
-
-        # Try xlm-roberta NER
-        try:
-            ner = pipeline("token-classification", model="xlm-roberta-base",
-                           aggregation_strategy="simple", device=-1)
-            logger.info("Loaded xlm-roberta-base for NER")
-            return ner, "xlm-roberta"
         except Exception:
             pass
     except ImportError:
@@ -189,6 +213,8 @@ class NERExtractor:
                 if ent.label_ in target_types:
                     if field_name in ("name", "father_name") and _is_blacklisted_name(ent.text):
                         continue
+                    if field_name == "address" and not _is_valid_address(ent.text):
+                        continue
                     proximity = _keyword_proximity(ent.text, ent.start_char, text, keywords)
                     candidates.append((ent.text, 0.72 * 0.7 + proximity * 0.3))
 
@@ -202,21 +228,41 @@ class NERExtractor:
         return None, 0.0, None
 
     def _keyword_anchor(self, text, field_name, words, keywords):
-        """Find keyword anchor and extract value from nearby words."""
+        """Find keyword anchor and extract value from nearby OCR words."""
         text_lower = text.lower()
         for kw in keywords:
             idx = text_lower.find(kw.lower())
             if idx >= 0:
                 after = text[idx + len(kw):].strip().lstrip(":").strip()
-                parts = after.split()[:5]
-                # Filter skip words
-                skip = {"name", "dob", "date", "of", "birth", "gender", "sex",
-                        "address", "government", "india", "uid", "male", "female"}
-                parts = [p for p in parts if p.lower() not in skip]
-                if parts:
-                    value = " ".join(parts)
-                    if field_name in ("name", "father_name") and _is_blacklisted_name(value):
-                        continue
-                    bbox = _find_bbox_for_text(value, words)
-                    return value, 0.55, bbox
+
+                if field_name == "address":
+                    # For address: grab more words and stop at next known field label
+                    stop_keywords = {"dob", "date", "birth", "gender", "sex",
+                                     "phone", "mobile", "aadhaar", "uid", "name",
+                                     "male", "female"}
+                    parts = []
+                    for word in after.split():
+                        if word.lower() in stop_keywords:
+                            break
+                        parts.append(word)
+                    parts = parts[:15]  # cap at 15 words
+                    if parts:
+                        value = " ".join(parts)
+                        if not _is_valid_address(value):
+                            continue
+                        bbox = _find_bbox_for_text(value, words)
+                        return value, 0.55, bbox
+                else:
+                    parts = after.split()[:5]
+                    # Filter skip words
+                    skip = {"name", "dob", "date", "of", "birth", "gender", "sex",
+                            "address", "government", "india", "uid", "male", "female",
+                            "no", "number"}
+                    parts = [p for p in parts if p.lower() not in skip]
+                    if parts:
+                        value = " ".join(parts)
+                        if field_name in ("name", "father_name") and _is_blacklisted_name(value):
+                            continue
+                        bbox = _find_bbox_for_text(value, words)
+                        return value, 0.55, bbox
         return None, 0.0, None

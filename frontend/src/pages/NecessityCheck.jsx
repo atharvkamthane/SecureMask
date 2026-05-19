@@ -6,10 +6,20 @@ import DocTypeBadge from '../components/domain/DocTypeBadge'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import { CONTEXT_MAP } from '../constants/contexts'
+import { computeProjectedPei } from '../utils/peiColor'
 
 export default function NecessityCheck() {
   const { scan, setDecisions } = useScan()
   const navigate = useNavigate()
+  const fields = scan?.detected_fields || []
+  const excess = fields.filter(f => !f.required)
+  const contextLabel = scan ? (CONTEXT_MAP[scan.declared_context] || scan.declared_context) : ''
+  const peiBefore = scan?.pei_before || 0
+  const peiAfterProjected = computeProjectedPei(
+    fields,
+    Object.fromEntries(fields.map(f => [f.field_name, f.required ? 'allow' : 'redact']))
+  )
+  const reductionPct = peiBefore > 0 ? Math.round(((peiBefore - peiAfterProjected) / peiBefore) * 100) : 0
 
   if (!scan) {
     return (
@@ -20,20 +30,9 @@ export default function NecessityCheck() {
     )
   }
 
-  const fields = scan.detected_fields || []
-  const excess = fields.filter(f => !f.required)
-  const required = fields.filter(f => f.required)
-  const contextLabel = CONTEXT_MAP[scan.declared_context] || scan.declared_context
-  const peiBefore = scan.pei_before || 0
-  const peiAfterProjected = fields.reduce((acc, f) => {
-    if (f.required) return acc + f.sensitivity_weight * 2
-    return acc
-  }, 0)
-  const reductionPct = peiBefore > 0 ? Math.round(((peiBefore - peiAfterProjected) / peiBefore) * 100) : 0
-
   const applyAll = () => {
     const decs = {}
-    fields.forEach(f => { decs[f.field_name] = f.required ? 'allow' : 'redact' })
+    fields.forEach(f => { decs[f.field_name] = f.suggested_action || (f.required ? 'allow' : 'redact') })
     setDecisions(decs)
     navigate('/redaction')
   }

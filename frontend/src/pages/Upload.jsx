@@ -27,7 +27,7 @@ export default function Upload() {
       setScan(result)
       toast.success('scan complete')
       navigate('/detection')
-    } catch (err) {
+    } catch (_err) {
       // Error handled by axios interceptor
     } finally {
       setLoading(false)

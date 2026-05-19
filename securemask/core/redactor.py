@@ -7,7 +7,10 @@ Modes:
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from PIL import Image, ImageDraw
 
@@ -46,10 +49,18 @@ class Redactor:
             if field.bounding_box is None:
                 continue
 
-            x = int(field.bounding_box.x) - self.PADDING
-            y = int(field.bounding_box.y) - self.PADDING
-            x2 = x + int(field.bounding_box.width) + self.PADDING * 2
-            y2 = y + int(field.bounding_box.height) + self.PADDING * 2
+            # Skip placeholder bounding boxes — these mean the OCR couldn't
+            # locate the field spatially. Redacting at (0,0) would black out
+            # the document header area incorrectly.
+            bb = field.bounding_box
+            if bb.width <= 2 and bb.height <= 2:
+                logger.debug("Skipping redaction for %s: placeholder bbox", field.field_name)
+                continue
+
+            x = int(bb.x) - self.PADDING
+            y = int(bb.y) - self.PADDING
+            x2 = x + int(bb.width) + self.PADDING * 2
+            y2 = y + int(bb.height) + self.PADDING * 2
 
             # Clamp to image bounds
             x = max(0, x)
@@ -58,11 +69,11 @@ class Redactor:
             y2 = min(img.height, y2)
 
             if decision == "redact":
-                draw.rectangle([x, y, x2, y2], fill=(0, 0, 0))
+                draw.rectangle([x, y, x2, y2], fill=(255, 255, 255))
             elif decision == "mask":
-                # Partial mask — show first 40px, black bar over rest
+                # Partial mask — show first 40px, white bar over rest
                 visible_width = min(40, x2 - x)
-                draw.rectangle([x + visible_width, y, x2, y2], fill=(0, 0, 0))
+                draw.rectangle([x + visible_width, y, x2, y2], fill=(255, 255, 255))
 
         return img
 

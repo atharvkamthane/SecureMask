@@ -77,6 +77,7 @@ class FieldResponse(BaseModel):
     always_redact: bool
     explanation: str
     required: bool
+    suggested_action: str
     redaction_decision: str
 
 
@@ -179,7 +180,7 @@ async def upload_document(file: UploadFile = File(...),
 
     # OCR
     ocr_engine = _get_ocr()
-    ocr_result = ocr_engine.extract(str(original_path))
+    ocr_result = ocr_engine.extract(str(processable_path))
 
     # Classify
     classifier = _get_classifier()
@@ -195,13 +196,23 @@ async def upload_document(file: UploadFile = File(...),
         required = check_necessity(classification.document_type, field.field_name, context)
         field.required = required
         necessity_results[field.field_name] = required
-        # Default decision: redact excess fields, allow required ones
+        
+        # Action Suggestion Logic
         if field.always_redact:
-            field.redaction_decision = "redact"
+            field.suggested_action = "redact"
         elif required:
-            field.redaction_decision = "allow"
+            # If required, allow by default, but suggest mask for very sensitive identifiers
+            if field.field_name in ["aadhaar_number", "pan_number", "passport_number", "dl_number", "epic_number"] \
+                    and context in ["identity_verification", "kyc_onboarding"]:
+                field.suggested_action = "mask" # Partial mask is usually better for IDs even if 'required'
+            else:
+                field.suggested_action = "allow"
         else:
-            field.redaction_decision = "redact"
+            # If excess, suggest redact
+            field.suggested_action = "redact"
+
+        # Initialize user decision to the suggested action
+        field.redaction_decision = field.suggested_action
 
     # PEI
     pei_before = compute_pei(detected_fields, necessity_results)
@@ -341,6 +352,8 @@ async def scan_text(request: ScanTextRequest):
     necessity_results = {}
     for f in fields:
         f.required = False
+        f.suggested_action = "redact"
+        f.redaction_decision = "redact"
         necessity_results[f.field_name] = False
 
     pei = compute_pei(fields, necessity_results)
@@ -374,6 +387,7 @@ def _field_to_response(f: DetectedField) -> FieldResponse:
         always_redact=f.always_redact,
         explanation=f.explanation,
         required=f.required,
+        suggested_action=f.suggested_action,
         redaction_decision=f.redaction_decision,
     )
 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Download, Printer, ArrowRight } from 'lucide-react'
 import { getAudit } from '../api/scan'
@@ -16,15 +16,24 @@ export default function AuditReport() {
   const [report, setReport] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const navigate = useNavigate()
-
   useEffect(() => {
     if (!scanId) return
-    setLoading(true)
+
+    let cancelled = false
     getAudit(scanId)
-      .then(setReport)
-      .catch(e => setError(e.message || 'failed to load report'))
-      .finally(() => setLoading(false))
+      .then(data => {
+        if (!cancelled) setReport(data)
+      })
+      .catch(e => {
+        if (!cancelled) setError(e.message || 'failed to load report')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [scanId])
 
   if (loading) {
@@ -46,7 +55,7 @@ export default function AuditReport() {
 
   if (!report) return null
 
-  const fields = report.fields || report.detected_fields || []
+  const fields = report.fields_detected || report.fields || report.detected_fields || []
   const events = report.timeline || report.events || [
     { time: report.timestamp || report.created_at, action: 'document uploaded' },
     { time: report.timestamp || report.created_at, action: 'ocr extraction completed' },
@@ -105,7 +114,7 @@ export default function AuditReport() {
               {fields.map((f, i) => (
                 <tr key={i} className="border-b border-border last:border-0">
                   <td className="py-2.5 text-sm text-text-1">{f.field_name}</td>
-                  <td className="py-2.5 t-mono text-accent text-xs">{maskValue(f.field_value || f.value_preview)}</td>
+                  <td className="py-2.5 t-mono text-accent text-xs">{maskValue(f.detected_value_masked || f.field_value || f.value_preview)}</td>
                   <td className="py-2.5 text-text-3 text-xs">{f.detection_method || 'regex'}</td>
                   <td className="py-2.5">
                     <span className={`text-xs ${f.redaction_decision === 'allow' || f.required ? 'text-success' : 'text-danger'}`}>

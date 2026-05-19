@@ -1,17 +1,17 @@
-import { useRef, useEffect, useMemo } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import { motion, useScroll, useTransform } from 'framer-motion'
 import { Link } from 'react-router-dom'
 
 function ParticleField() {
   const canvasRef = useRef(null)
-  const particles = useMemo(() =>
+  const [particles] = useState(() =>
     Array.from({ length: 60 }, () => ({
       x: Math.random() * 100,
       y: Math.random() * 100,
       vx: (Math.random() - 0.5) * 0.15,
       vy: (Math.random() - 0.5) * 0.15,
       size: Math.random() * 2 + 1,
-    })), [])
+    })))
 
   useEffect(() => {
     const canvas = canvasRef.current

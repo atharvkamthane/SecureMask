@@ -34,7 +34,18 @@ class FuzzyRegexExtractor:
         # Step 1: Try exact regex
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            value = match.group()
+            # If the regex has capturing groups, try to reconstruct a cleaner value
+            if match.lastindex and match.lastindex >= 3:
+                # Date pattern: group(1)/group(2)/group(3) = DD/MM/YYYY
+                try:
+                    value = f"{match.group(1)}/{match.group(2)}/{match.group(3)}"
+                except IndexError:
+                    value = match.group()
+            elif match.lastindex and match.lastindex >= 1:
+                value = match.group(1)
+            else:
+                value = match.group()
+            value = value.strip()
             bbox = self._find_bbox(value, words)
             return value, 0.95, bbox
 

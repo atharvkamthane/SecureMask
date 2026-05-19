@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { Download, FileText, Loader2, RefreshCw } from 'lucide-react'
@@ -7,12 +7,14 @@ import { useScan } from '../hooks/useScan'
 import { useRedaction } from '../hooks/useRedaction'
 import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
-import { peiColor } from '../utils/peiColor'
+import { computeProjectedPei, peiColor } from '../utils/peiColor'
 
 export default function RedactionPreview() {
   const { scan, decisions, updateDecision } = useScan()
   const { applyRedaction, loading } = useRedaction()
   const navigate = useNavigate()
+  const fields = useMemo(() => scan?.detected_fields || [], [scan])
+  const peiAfter = useMemo(() => computeProjectedPei(fields, decisions), [fields, decisions])
 
   if (!scan) {
     return (
@@ -22,15 +24,6 @@ export default function RedactionPreview() {
       </div>
     )
   }
-
-  const fields = scan.detected_fields || []
-  const peiAfter = useMemo(() => {
-    return Math.min(fields.reduce((acc, f) => {
-      const dec = decisions[f.field_name] || 'redact'
-      if (dec === 'allow') return acc + (f.required ? f.sensitivity_weight * 2 : f.sensitivity_weight * 10)
-      return acc + (f.required ? f.sensitivity_weight * 2 : 0)
-    }, 0), 100)
-  }, [fields, decisions])
 
   const buttons = [
     { key: 'mask', label: 'Mask', color: 'var(--warning)' },
@@ -44,7 +37,9 @@ export default function RedactionPreview() {
       if (result?.redacted_image_url) {
         toast.success('redacted document generated')
       }
-    } catch {}
+    } catch (_error) {
+      return null
+    }
   }
 
   const handleDownload = () => {
@@ -112,12 +107,13 @@ export default function RedactionPreview() {
                   : <span className="text-danger text-[10px] shrink-0 font-medium">excess</span>
                 }
               </div>
-              <div className="flex gap-1.5 shrink-0">
-                {buttons.map(b => {
-                  const active = decisions[f.field_name] === b.key
-                  const isDisabled = f.always_redact && b.key !== 'redact'
-                  return (
-                    <button
+              <div className="flex flex-col items-end gap-1 shrink-0">
+                <div className="flex gap-1.5">
+                  {buttons.map(b => {
+                    const active = decisions[f.field_name] === b.key
+                    const isDisabled = f.always_redact && b.key !== 'redact'
+                    return (
+                      <button
                       key={b.key}
                       onClick={() => !isDisabled && updateDecision(f.field_name, b.key)}
                       disabled={isDisabled}
@@ -132,6 +128,12 @@ export default function RedactionPreview() {
                     </button>
                   )
                 })}
+                </div>
+                {f.suggested_action && decisions[f.field_name] !== f.suggested_action && (
+                  <span className="text-[10px] text-text-3">
+                    suggested: <span className="font-medium text-text-2">{f.suggested_action}</span>
+                  </span>
+                )}
               </div>
             </div>
           ))}

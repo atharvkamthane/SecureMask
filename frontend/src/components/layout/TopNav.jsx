@@ -15,7 +15,7 @@ const links = [
 export default function TopNav() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const { scan } = useScan()
-  const { user, logoutUser } = useAuth()
+  const { user } = useAuth()
   const navigate = useNavigate()
   const lastPEI = scan?.pei_before
 

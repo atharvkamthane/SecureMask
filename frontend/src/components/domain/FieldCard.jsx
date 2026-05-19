@@ -1,10 +1,8 @@
 import { motion } from 'framer-motion'
 import Badge from '../ui/Badge'
 import { maskValue, methodLabel, methodColor } from '../../utils/fieldHelpers'
-import { peiLabel } from '../../utils/peiColor'
 
 export default function FieldCard({ field, decision, onDecisionChange, index = 0 }) {
-  const riskLevel = peiLabel(field.sensitivity_weight * 10)
   const borderColor = field.required ? 'var(--success)' : 'var(--danger)'
 
   const buttons = [

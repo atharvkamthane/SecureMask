@@ -5,13 +5,17 @@ import { useScan } from '../hooks/useScan'
 import PEIGauge from '../components/domain/PEIGauge'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
-import ProgressBar from '../components/ui/ProgressBar'
-import { peiColor } from '../utils/peiColor'
+import { computeProjectedPei, peiColor } from '../utils/peiColor'
 import { useAnimatedCount } from '../hooks/useAnimatedCount'
 
 export default function PEIScore() {
   const { scan, decisions } = useScan()
   const navigate = useNavigate()
+  const fields = scan?.detected_fields || []
+  const peiBefore = scan?.pei_before || 0
+  const peiAfterCapped = computeProjectedPei(fields, decisions)
+  const animatedBefore = useAnimatedCount(peiBefore, 800)
+  const animatedAfter = useAnimatedCount(peiAfterCapped, 800)
 
   if (!scan) {
     return (
@@ -21,18 +25,6 @@ export default function PEIScore() {
       </div>
     )
   }
-
-  const fields = scan.detected_fields || []
-  const peiBefore = scan.pei_before || 0
-  const peiAfter = fields.reduce((acc, f) => {
-    const dec = decisions[f.field_name] || 'redact'
-    if (dec === 'allow') return acc + (f.required ? f.sensitivity_weight * 2 : f.sensitivity_weight * 10)
-    return acc + (f.required ? f.sensitivity_weight * 2 : 0)
-  }, 0)
-  const peiAfterCapped = Math.min(peiAfter, 100)
-
-  const animatedBefore = useAnimatedCount(peiBefore, 800)
-  const animatedAfter = useAnimatedCount(peiAfterCapped, 800)
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="max-w-[640px] mx-auto space-y-8">

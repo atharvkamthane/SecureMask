@@ -182,6 +182,8 @@ class DocumentClassifier:
             return cnn_result
 
         kw_result = _keyword_classify(ocr_text)
+        if cnn_result.document_type == "unknown" and kw_result.document_type != "unknown":
+            return kw_result
         if kw_result.confidence > cnn_result.confidence:
             return kw_result
 

@@ -34,6 +34,7 @@ class DetectedField:
     always_redact: bool = False
     explanation: str = ""
     required: bool = False  # set by necessity classifier
+    suggested_action: str = "redact"  # redact, mask, or allow
     redaction_decision: str = "redact"
     metadata: dict[str, Any] = field(default_factory=dict)
     bounding_box_pct: BoundingBox | None = None  # percentage-based for frontend overlays
@@ -45,8 +46,19 @@ class DetectedField:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("metadata", None)
+        # Ensure bounding box values are native Python types (not numpy int32/float64)
+        if "bounding_box" in data and data["bounding_box"]:
+            bb = data["bounding_box"]
+            data["bounding_box"] = {
+                "x": int(bb["x"]), "y": int(bb["y"]),
+                "width": int(bb["width"]), "height": int(bb["height"]),
+            }
         if self.bounding_box_pct:
-            data["bounding_box_pct"] = asdict(self.bounding_box_pct)
+            pct = asdict(self.bounding_box_pct)
+            data["bounding_box_pct"] = {
+                "x": float(pct["x"]), "y": float(pct["y"]),
+                "width": float(pct["width"]), "height": float(pct["height"]),
+            }
         return data
 
     @classmethod
@@ -77,6 +89,7 @@ class DetectedField:
             always_redact=bool(data.get("always_redact", False)),
             explanation=data.get("explanation", ""),
             required=bool(data.get("required", False)),
+            suggested_action=data.get("suggested_action", "redact"),
             redaction_decision=data.get("redaction_decision", "redact"),
             metadata=data.get("metadata", {}),
             bounding_box_pct=pct_box,
