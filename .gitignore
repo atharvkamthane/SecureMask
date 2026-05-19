@@ -12,3 +12,6 @@ dist/
 .openclaude-profile.json
 reports/
 coverage/
+*.json
+securemask.db
+securemask/ml/synthetic_data/
