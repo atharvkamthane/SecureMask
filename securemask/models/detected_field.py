@@ -35,6 +35,7 @@ class DetectedField:
     explanation: str = ""
     required: bool = False  # set by necessity classifier
     suggested_action: str = "redact"  # redact, mask, or allow
+    suggestion_reason: str = ""
     redaction_decision: str = "redact"
     metadata: dict[str, Any] = field(default_factory=dict)
     bounding_box_pct: BoundingBox | None = None  # percentage-based for frontend overlays
@@ -90,6 +91,7 @@ class DetectedField:
             explanation=data.get("explanation", ""),
             required=bool(data.get("required", False)),
             suggested_action=data.get("suggested_action", "redact"),
+            suggestion_reason=data.get("suggestion_reason", ""),
             redaction_decision=data.get("redaction_decision", "redact"),
             metadata=data.get("metadata", {}),
             bounding_box_pct=pct_box,

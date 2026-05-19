@@ -22,6 +22,7 @@ from securemask.core.necessity import check_necessity
 from securemask.core.ocr import OCREngine
 from securemask.core.pei import compute_pei, compute_pei_after_redaction
 from securemask.core.preprocessor import preprocess
+from securemask.core.recommendations import recommend_action, summarize_recommendations
 from securemask.core.redactor import redact_image
 from securemask.db.database import get_connection
 from securemask.models.detected_field import BoundingBox, DetectedField
@@ -78,6 +79,7 @@ class FieldResponse(BaseModel):
     explanation: str
     required: bool
     suggested_action: str
+    suggestion_reason: str
     redaction_decision: str
 
 
@@ -90,6 +92,7 @@ class UploadResponse(BaseModel):
     pei_before: float
     needs_review_count: int
     raw_text: str
+    recommendation_summary: dict[str, Any]
     original_file_url: str
     processable_image_url: str
 
@@ -197,19 +200,9 @@ async def upload_document(file: UploadFile = File(...),
         field.required = required
         necessity_results[field.field_name] = required
         
-        # Action Suggestion Logic
-        if field.always_redact:
-            field.suggested_action = "redact"
-        elif required:
-            # If required, allow by default, but suggest mask for very sensitive identifiers
-            if field.field_name in ["aadhaar_number", "pan_number", "passport_number", "dl_number", "epic_number"] \
-                    and context in ["identity_verification", "kyc_onboarding"]:
-                field.suggested_action = "mask" # Partial mask is usually better for IDs even if 'required'
-            else:
-                field.suggested_action = "allow"
-        else:
-            # If excess, suggest redact
-            field.suggested_action = "redact"
+        recommendation = recommend_action(field, classification.document_type, context, required)
+        field.suggested_action = recommendation.action
+        field.suggestion_reason = recommendation.reason
 
         # Initialize user decision to the suggested action
         field.redaction_decision = field.suggested_action
@@ -239,6 +232,7 @@ async def upload_document(file: UploadFile = File(...),
         pei_before=pei_before,
         needs_review_count=needs_review_count,
         raw_text=ocr_result.full_text,
+        recommendation_summary=summarize_recommendations(detected_fields),
         original_file_url=f"/files/uploads/{scan_id}/{file.filename}",
         processable_image_url=f"/files/processed/{scan_id}/preprocessed.png",
     )
@@ -353,6 +347,7 @@ async def scan_text(request: ScanTextRequest):
     for f in fields:
         f.required = False
         f.suggested_action = "redact"
+        f.suggestion_reason = "Raw text scans do not establish a lawful document purpose, so detected PII should be removed."
         f.redaction_decision = "redact"
         necessity_results[f.field_name] = False
 
@@ -388,6 +383,7 @@ def _field_to_response(f: DetectedField) -> FieldResponse:
         explanation=f.explanation,
         required=f.required,
         suggested_action=f.suggested_action,
+        suggestion_reason=f.suggestion_reason,
         redaction_decision=f.redaction_decision,
     )
 

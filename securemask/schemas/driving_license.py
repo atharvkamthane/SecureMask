@@ -44,4 +44,12 @@ fields = [
         anchor_keywords=["blood", "bg", "blood group"],
         zone="middle",
     ),
+    FieldSchema(
+        field_name="photo",
+        sensitivity_weight=8,
+        extraction_method="image",
+        anchor_keywords=[],
+        zone="top",
+        always_redact=True,
+    ),
 ]

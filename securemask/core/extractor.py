@@ -41,22 +41,45 @@ def _normalize_bbox_pct(box: BoundingBox, w: int, h: int) -> BoundingBox:
 
 
 def _detect_photo_region(image_path: str) -> BoundingBox | None:
-    """Detect face region using OpenCV Haar cascade."""
+    """Detect a document portrait while avoiding oversized false positives."""
     try:
         img = cv2.imread(str(image_path))
         if img is None:
             return None
+        img_h, img_w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
         faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
-        if len(faces) > 0:
-            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-            pad = int(w * 0.3)
-            return BoundingBox(
-                max(0, x - pad), max(0, y - pad),
-                min(img.shape[1], w + 2 * pad),
-                min(img.shape[0], h + 2 * pad),
-            )
+
+        candidates = []
+        for x, y, w, h in faces:
+            area_ratio = (w * h) / max(1, img_w * img_h)
+            width_ratio = w / max(1, img_w)
+            height_ratio = h / max(1, img_h)
+            aspect_ratio = w / max(1, h)
+
+            if area_ratio > 0.18 or width_ratio > 0.38 or height_ratio > 0.55:
+                continue
+            if not 0.55 <= aspect_ratio <= 1.45:
+                continue
+
+            # ID portraits are normally near the left/right edge, not covering
+            # the center text block. This rejects text clusters mistaken as faces.
+            center_x = x + w / 2
+            if 0.35 * img_w < center_x < 0.65 * img_w and area_ratio > 0.04:
+                continue
+
+            candidates.append((x, y, w, h, area_ratio))
+
+        if candidates:
+            x, y, w, h, _ = max(candidates, key=lambda f: f[4])
+            pad_x = int(w * 0.18)
+            pad_y = int(h * 0.22)
+            left = max(0, x - pad_x)
+            top = max(0, y - pad_y)
+            right = min(img_w, x + w + pad_x)
+            bottom = min(img_h, y + h + pad_y)
+            return BoundingBox(left, top, right - left, bottom - top)
     except Exception:
         pass
     return None

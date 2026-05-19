@@ -51,4 +51,12 @@ fields = [
         anchor_keywords=["address", "constituency", "part no", "पता", "विधान सभा"],
         zone="bottom",
     ),
+    FieldSchema(
+        field_name="photo",
+        sensitivity_weight=8,
+        extraction_method="image",
+        anchor_keywords=[],
+        zone="top",
+        always_redact=True,
+    ),
 ]

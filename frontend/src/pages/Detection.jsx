@@ -8,6 +8,7 @@ import DocTypeBadge from '../components/domain/DocTypeBadge'
 import ProgressBar from '../components/ui/ProgressBar'
 import Button from '../components/ui/Button'
 import { peiColor } from '../utils/peiColor'
+import { actionCopy, recommendationCounts } from '../utils/recommendations'
 
 export default function Detection() {
   const { scan, decisions, updateDecision } = useScan()
@@ -25,6 +26,7 @@ export default function Detection() {
 
   const fields = scan.detected_fields || []
   const pei = scan.pei_before || 0
+  const recommendations = recommendationCounts(fields)
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
@@ -56,6 +58,29 @@ export default function Detection() {
           <div className="flex items-center gap-3">
             <DocTypeBadge docType={scan.document_type} />
             <span className="text-text-2 text-sm">{fields.length} fields detected</span>
+          </div>
+
+          <div className="bg-bg-surface border border-accent/30 rounded-[var(--r-lg)] p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="t-label text-accent">recommended protection</span>
+                <p className="text-text-2 text-sm mt-1 leading-relaxed">
+                  {scan.recommendation_summary?.summary || 'Review the suggested action on each field before redaction.'}
+                </p>
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => navigate('/necessity')}>review</Button>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-4">
+              {['allow', 'mask', 'redact'].map(action => {
+                const copy = actionCopy(action)
+                return (
+                  <div key={action} className="rounded-[var(--r-md)] border border-border bg-bg-surface-2 p-3">
+                    <p className={`t-mono text-lg font-semibold ${copy.tone}`}>{recommendations[action] || 0}</p>
+                    <p className="text-text-3 text-[11px] uppercase tracking-[0.12em] mt-0.5">{copy.label}</p>
+                  </div>
+                )
+              })}
+            </div>
           </div>
 
           <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">

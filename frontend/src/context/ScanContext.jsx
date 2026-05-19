@@ -14,7 +14,8 @@ export function ScanProvider({ children }) {
         next.detected_fields.forEach(f => {
           decs[f.field_name] = f.redaction_decision || 'redact'
         })
-        setDecisions(prev => ({ ...decs, ...prev }))
+        const isSameScan = prev?.scan_id && next?.scan_id && prev.scan_id === next.scan_id
+        setDecisions(prevDecisions => (isSameScan ? { ...decs, ...prevDecisions } : decs))
       }
       return next
     })

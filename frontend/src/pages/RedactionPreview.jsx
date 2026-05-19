@@ -8,6 +8,7 @@ import { useRedaction } from '../hooks/useRedaction'
 import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
 import { computeProjectedPei, peiColor } from '../utils/peiColor'
+import { actionCopy, recommendationCounts } from '../utils/recommendations'
 
 export default function RedactionPreview() {
   const { scan, decisions, updateDecision } = useScan()
@@ -15,6 +16,7 @@ export default function RedactionPreview() {
   const navigate = useNavigate()
   const fields = useMemo(() => scan?.detected_fields || [], [scan])
   const peiAfter = useMemo(() => computeProjectedPei(fields, decisions), [fields, decisions])
+  const recommendations = useMemo(() => recommendationCounts(fields), [fields])
 
   if (!scan) {
     return (
@@ -58,9 +60,22 @@ export default function RedactionPreview() {
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
       <h1 className="t-h2 text-text-1">redaction preview</h1>
 
-      {/* Side by side preview */}
+      <div className="bg-bg-surface border border-border rounded-[var(--r-lg)] p-4">
+        <span className="t-label text-text-3">recommended defaults</span>
+        <div className="grid grid-cols-3 gap-2 mt-3">
+          {['allow', 'mask', 'redact'].map(action => {
+            const copy = actionCopy(action)
+            return (
+              <div key={action} className="rounded-[var(--r-md)] bg-bg-surface-2 border border-border p-3">
+                <p className={`t-mono text-lg font-semibold ${copy.tone}`}>{recommendations[action] || 0}</p>
+                <p className="text-text-3 text-[11px] uppercase tracking-[0.12em]">{copy.label}</p>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Original */}
         <div className="space-y-2">
           <Badge variant="high">original</Badge>
           <div className="bg-bg-surface border border-border rounded-[var(--r-lg)] overflow-hidden">
@@ -71,7 +86,6 @@ export default function RedactionPreview() {
           </div>
         </div>
 
-        {/* Protected */}
         <div className="space-y-2">
           <Badge variant="low">protected</Badge>
           <div className="bg-bg-surface border border-border rounded-[var(--r-lg)] overflow-hidden">
@@ -89,45 +103,51 @@ export default function RedactionPreview() {
         </div>
       </div>
 
-      {/* Field decision controls */}
       <div className="bg-bg-surface border border-border rounded-[var(--r-lg)] overflow-hidden">
         <div className="px-4 py-3 border-b border-border bg-bg-surface-2">
           <span className="t-label text-text-3">field decisions</span>
         </div>
         <div className="divide-y divide-border">
           {fields.map((f, i) => (
-            <div key={i} className="px-4 py-3 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3 min-w-0">
-                <span className="text-sm text-text-1 truncate font-medium">{f.field_name}</span>
-                <span className="text-text-3 text-xs truncate max-w-[180px]" title={f.field_value}>
-                  {f.field_value || '—'}
-                </span>
-                {f.required
-                  ? <span className="text-success text-[10px] shrink-0 font-medium">required</span>
-                  : <span className="text-danger text-[10px] shrink-0 font-medium">excess</span>
-                }
+            <div key={i} className="px-4 py-3 flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-3 min-w-0 flex-wrap">
+                  <span className="text-sm text-text-1 truncate font-medium">{f.field_name}</span>
+                  <span className="text-text-3 text-xs truncate max-w-[180px]" title={f.field_value}>
+                    {f.field_value || '-'}
+                  </span>
+                  {f.required
+                    ? <span className="text-success text-[10px] shrink-0 font-medium">required</span>
+                    : <span className="text-danger text-[10px] shrink-0 font-medium">excess</span>
+                  }
+                </div>
+                {f.suggestion_reason && (
+                  <p className="text-text-3 text-xs leading-relaxed mt-1 max-w-[560px]">
+                    recommended {f.suggested_action}: {f.suggestion_reason}
+                  </p>
+                )}
               </div>
-              <div className="flex flex-col items-end gap-1 shrink-0">
-                <div className="flex gap-1.5">
+              <div className="flex flex-col sm:items-end gap-1 shrink-0">
+                <div className="flex gap-1.5 flex-wrap">
                   {buttons.map(b => {
                     const active = decisions[f.field_name] === b.key
                     const isDisabled = f.always_redact && b.key !== 'redact'
                     return (
                       <button
-                      key={b.key}
-                      onClick={() => !isDisabled && updateDecision(f.field_name, b.key)}
-                      disabled={isDisabled}
-                      title={isDisabled ? 'This field contains sensitive elements that are forced to be redacted by policy' : ''}
-                      className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-200 ${isDisabled ? 'opacity-30 cursor-not-allowed' : ''}`}
-                      style={active
-                        ? { background: b.color + '20', color: b.color, borderColor: b.color + '60' }
-                        : { background: 'transparent', color: 'var(--text-3)', borderColor: 'var(--border)' }
-                      }
-                    >
-                      {b.label}
-                    </button>
-                  )
-                })}
+                        key={b.key}
+                        onClick={() => !isDisabled && updateDecision(f.field_name, b.key)}
+                        disabled={isDisabled}
+                        title={isDisabled ? 'This field must be fully redacted by policy' : actionCopy(b.key).description}
+                        className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-200 ${isDisabled ? 'opacity-30 cursor-not-allowed' : ''}`}
+                        style={active
+                          ? { background: `${b.color}20`, color: b.color, borderColor: `${b.color}60` }
+                          : { background: 'transparent', color: 'var(--text-3)', borderColor: 'var(--border)' }
+                        }
+                      >
+                        {b.label}
+                      </button>
+                    )
+                  })}
                 </div>
                 {f.suggested_action && decisions[f.field_name] !== f.suggested_action && (
                   <span className="text-[10px] text-text-3">
@@ -140,15 +160,14 @@ export default function RedactionPreview() {
         </div>
       </div>
 
-      {/* Sticky bottom bar */}
-      <div className="sticky bottom-0 bg-bg-base border-t border-border py-4 -mx-4 px-4 sm:-mx-6 sm:px-6 flex items-center justify-between">
+      <div className="sticky bottom-0 bg-bg-base border-t border-border py-4 -mx-4 px-4 sm:-mx-6 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="text-text-3 text-sm">pei after:</span>
           <span className="font-mono text-lg font-semibold" style={{ color: peiColor(peiAfter) }}>
             {Math.round(peiAfter)}
           </span>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-wrap">
           <Button variant="ghost" onClick={handleApplyRedaction} disabled={loading}>
             {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             {scan.redacted_image_url ? 're-generate' : 'generate redaction'}

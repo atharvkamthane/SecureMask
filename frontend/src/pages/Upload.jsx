@@ -6,6 +6,7 @@ import toast from 'react-hot-toast'
 import { useScan } from '../hooks/useScan'
 import { uploadDocument } from '../api/scan'
 import { CONTEXTS } from '../constants/contexts'
+import { CONTEXT_GUIDANCE } from '../utils/recommendations'
 import StepIndicator from '../components/ui/StepIndicator'
 import FileUpload from '../components/ui/FileUpload'
 import Button from '../components/ui/Button'
@@ -18,6 +19,7 @@ export default function Upload() {
   const navigate = useNavigate()
 
   const currentStep = file ? (loading ? 2 : 1) : 0
+  const guidance = CONTEXT_GUIDANCE[context]
 
   const handleScan = useCallback(async () => {
     if (!file) return
@@ -43,10 +45,8 @@ export default function Upload() {
 
       <StepIndicator steps={['Upload', 'Configure', 'Scan']} current={currentStep} />
 
-      {/* File upload zone */}
       <FileUpload onFile={setFile} />
 
-      {/* Context selector */}
       <div className="space-y-2">
         <label className="t-small text-text-2">why are you sharing this document?</label>
         <select
@@ -59,11 +59,16 @@ export default function Upload() {
           ))}
         </select>
         <p className="text-text-3 text-xs italic leading-relaxed">
-          this powers the necessity classifier — only truly required fields are marked safe
+          this powers the necessity classifier; only truly required fields are marked safe
         </p>
+        {guidance && (
+          <div className="mt-3 rounded-[var(--r-md)] border border-accent/30 bg-accent-dim p-3">
+            <p className="text-text-1 text-sm font-medium">{guidance.title}</p>
+            <p className="text-text-2 text-xs leading-relaxed mt-1">{guidance.body}</p>
+          </div>
+        )}
       </div>
 
-      {/* Scan button */}
       <Button
         onClick={handleScan}
         disabled={!file || loading}
