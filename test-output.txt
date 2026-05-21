@@ -1,0 +1,32 @@
+﻿python : PaddleOCR (en) unavailable: No module named 'paddleocr'
+At C:\Users\Atharv\AppData\Local\Temp\ps-script-d3821aed-72a1-4da0-a57e-2619dc168eab.ps1:88 char:19
++ cd d:\SecureMask; python scripts\test_aadhaar_extract.py 2>&1 | Out-F ...
++                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (PaddleOCR (en) ...med 'paddleocr':String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+PaddleOCR (English) pre-warm failed: reader is None (check earlier WARNING for exception)
+EasyOCR reader initialised (en+hi)
+EasyOCR reader initialised (en+hi)
+PaddleOCR (hi) unavailable: No module named 'paddleocr'
+C:\Users\Atharv\AppData\Local\Programs\Python\Python310\lib\site-packages\torch\utils\data\dataloader.py:775: 
+UserWarning: 'pin_memory' argument is set as true but no accelerator is found, then device pinned memory won't be used.
+  super().__init__(loader)
+PaddleOCR unavailable (conf=0.00, words=0) ù using EasyOCR
+OCR engine: EasyOCR ù 64 words @ conf 0.16
+Devanagari name merged tokens: \u092e\u0941\u0930\u0939\u093e\u0930 \u0920\u092e\u0920\u093e\u0928 
+\u0905\u092a\u0930\u094d\u0935
+Aadhaar name recovered via DOB-line pattern: Aihawv Muihn Kamman
+=== OCR reader pre-warm ===
+Paddle reader: None
+EasyOCR reader: OK
+
+=== OCR ===
+Image: 999x722, words=64
+Preview: ???? ????? Govemment ot India ????? = ????? Aihawv Muihn Kamman ???? ????? 008? !5 02000 ?o? ???? ?? ????? ??? ???? ?????? ???? ????????? 4 ??? ?????????? ????? ??? (????? ????????...
+
+=== Fields (4) ===
+  aadhaar_number   2530 0479 3566                           bbox=(309,593,366x64) [36.6%w 8.9%h] conf=0.96
+  name             Aihawv Muihn Kamman                      bbox=(328,222,298x30) [29.8%w 4.2%h] conf=0.82
+  name_hi          ?????? ????? ?????                       bbox=(327,164,224x52) [22.4%w 7.2%h] conf=0.78
+  photo            PHOTO_REGION                             bbox=(19,84,126x140) [12.6%w 19.4%h] conf=0.85

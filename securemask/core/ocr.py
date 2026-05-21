@@ -21,6 +21,11 @@ from functools import lru_cache
 from pathlib import Path
 from statistics import mean
 
+# Must be set before any ``import paddle`` (Windows OneDNN / PIR crash).
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -384,6 +389,24 @@ def _prewarm_easyocr() -> None:
     threading.Thread(target=_warm, daemon=True, name="easyocr-prewarm").start()
 
 
+def _prewarm_paddle() -> None:
+    """Pre-load English PaddleOCR at startup (logs success or WARNING)."""
+    import threading
+
+    def _warm():
+        try:
+            reader = _get_paddle_reader_en()
+            if reader is None:
+                logger.warning(
+                    "PaddleOCR (English) pre-warm failed: reader is None "
+                    "(check earlier WARNING for exception)"
+                )
+        except Exception as exc:
+            logger.warning("PaddleOCR (English) pre-warm failed: %s", exc)
+
+    threading.Thread(target=_warm, daemon=True, name="paddle-prewarm").start()
+
+
 def _split_easyocr_phrases(words: list[OCRWord]) -> list[OCRWord]:
     """Split multi-word EasyOCR phrase tokens into individual sub-word tokens.
 
@@ -477,6 +500,7 @@ def _normalize(text: str) -> str:
 # SECUREMASK_SKIP_OCR_PREWARM=1 before importing this module.
 if os.getenv(SKIP_EASYOCR_PREWARM_ENV) != "1":
     _prewarm_easyocr()
+    _prewarm_paddle()
 
 
 class OCREngine:

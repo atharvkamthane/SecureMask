@@ -71,9 +71,16 @@ _DOB_RE = re.compile(
     r'|\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\b'
 )
 _DOB_NEAR_ANCHOR_RE = re.compile(
-    r'(?i)(?:d0r|dob|0ob|जन्म|तारीख)[^\d]{0,15}'
-    r'(\d{1,2})[\s\/\-\.\+oO+]{1,4}(\d{1,2})[\s\/\-\.\+oO+]{1,4}(\d{4})'
+    r'(?i)(?:d0r|dob|0ob|008|जन्म|तारीख)[^\d]{0,20}'
+    r'(\d{1,2})[\s\/\-\.\+oO+!]{0,6}(\d{1,2})[\s\/\-\.\+oO+]{0,6}(\d{4})'
 )
+_DEVANAGARI_NAME_RE = re.compile(
+    r'[\u0900-\u097F]{2,}(?:\s+[\u0900-\u097F]{2,}){1,4}'
+)
+_NAME_HI_BLACKLIST = frozenset({
+    "भारत", "सरकार", "government", "india", "aadhaar", "आधार", "unique",
+    "identity", "नागरिक", "जन्म", "तारीख", "male", "female", "पुरुष",
+})
 
 
 def _preprocess_ocr_text(ocr_result: OCRResult) -> OCRResult:
@@ -103,6 +110,31 @@ def _preprocess_ocr_text(ocr_result: OCRResult) -> OCRResult:
 # ------------------------------------------------------------------
 # Bounding box helpers
 # ------------------------------------------------------------------
+
+def _sanitize_field_bbox(
+    field_name: str,
+    bbox: BoundingBox,
+    img_w: int,
+    img_h: int,
+) -> BoundingBox:
+    """Clamp oversized bboxes from line-level OCR matches."""
+    from securemask.utils.bbox_utils import clamp_bbox_sanity
+
+    limits = {
+        "dob": (0.45, 0.12),
+        "name": (0.55, 0.15),
+        "name_hi": (0.55, 0.15),
+        "gender": (0.35, 0.12),
+        "aadhaar_number": (0.65, 0.12),
+        "pan_number": (0.55, 0.10),
+        "passport_number": (0.45, 0.10),
+        "dl_number": (0.55, 0.10),
+        "epic_number": (0.45, 0.10),
+    }
+    max_w_pct, max_h_pct = limits.get(field_name, (0.5, 0.2))
+    ok = clamp_bbox_sanity(bbox, img_w, img_h, max_w_pct=max_w_pct, max_h_pct=max_h_pct)
+    return ok if ok is not None else BoundingBox(0, 0, 1, 1)
+
 
 def _normalize_bbox_pct(box: BoundingBox, w: int, h: int) -> BoundingBox:
     if w <= 0 or h <= 0:
@@ -307,11 +339,16 @@ def _aadhaar_number_broad_scan(
                 if len(set(uid)) < 3:
                     continue
                 raw_val = m.group().strip()
-                bbox = _find_bbox_in_words(raw_val, words)
                 from securemask.utils.bbox_utils import expand_digit_sequence_bbox
-                expanded = expand_digit_sequence_bbox(raw_val, words)
-                if expanded:
-                    bbox = expanded
+                expanded = expand_digit_sequence_bbox(
+                    raw_val,
+                    words,
+                    image_height=ocr_result.image_height,
+                    image_width=ocr_result.image_width,
+                )
+                bbox = expanded or _find_bbox_in_words(
+                    re.sub(r"\s", "", raw_val), words, max_window=3
+                )
                 logger.info("Aadhaar broad-scan found UID: %s****", uid[:4])
                 from securemask.models.detected_field import DetectedField
                 return DetectedField(
@@ -338,6 +375,74 @@ def _normalize_dob_value(raw: str) -> str:
     return raw.strip()
 
 
+def _is_plausible_dob(val: str) -> bool:
+    from datetime import date
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", val)
+    if not m:
+        return False
+    d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if not (1 <= d <= 31 and 1 <= mo <= 12):
+        return False
+    return 1900 <= y <= date.today().year
+
+
+def _dob_from_anchor_words(words: list[OCRWord]) -> DetectedField | None:
+    """Build DOB from digit tokens on the same row as a जन्म/DOB anchor word."""
+    from datetime import date
+    from securemask.utils.bbox_utils import find_date_digits_bbox
+
+    anchors = ("जन्म", "तारीख", "008", "0ob", "dob", "d0r")
+    current_year = date.today().year
+    for i, w in enumerate(words):
+        low = w.text.lower()
+        if not any(a in low for a in anchors):
+            continue
+        row_y = w.bbox.y + w.bbox.height / 2
+        row_h = max(w.bbox.height, 24)
+        row_words = []
+        for w2 in words[i : i + 12]:
+            cy = w2.bbox.y + w2.bbox.height / 2
+            if abs(cy - row_y) > row_h * 1.5:
+                continue
+            row_words.append(w2)
+        row_text = _clean_for_digits(" ".join(w2.text for w2 in row_words))
+        m = re.search(
+            r"(\d{1,2})[\s\/\-\.\+oO+!]{0,6}(\d{1,2})[\s\/\-\.\+oO+]{0,6}(20\d{2})",
+            row_text,
+        )
+        if not m:
+            flat = re.sub(r"\D", "", row_text)
+            m8 = re.search(r"(\d{2})(\d{2})(20\d{2})", flat[-10:]) if len(flat) >= 8 else None
+            if m8:
+                m = m8
+        if m:
+            val = _normalize_dob_value(f"{m.group(1)}/{m.group(2)}/{m.group(3)}")
+            if not _is_plausible_dob(val):
+                flat = re.sub(r"\D", "", row_text)
+                tail = flat[-8:] if len(flat) >= 8 else flat
+                m8 = re.search(r"(\d{2})(\d{2})(20\d{2})", tail)
+                if m8:
+                    val = _normalize_dob_value(
+                        f"{m8.group(1)}/{m8.group(2)}/{m8.group(3)}"
+                    )
+            if _is_plausible_dob(val):
+                digit_words = [w for w in row_words if re.search(r"\d", w.text)]
+                bbox = find_date_digits_bbox(val, digit_words) or (
+                    digit_words[0].bbox if digit_words else w.bbox
+                )
+                logger.info("DOB word-row found: %s", val)
+                return DetectedField(
+                    field_name="dob",
+                    field_value=val,
+                    sensitivity_weight=6,
+                    detection_method="regex_fuzzy",
+                    confidence=0.83,
+                    bounding_box=bbox,
+                    always_redact=False,
+                )
+    return None
+
+
 def _dob_broad_scan(
     ocr_result: OCRResult,
     cleaned_result: OCRResult,
@@ -345,6 +450,11 @@ def _dob_broad_scan(
     """Fallback DOB scan across the entire text with multiple date formats."""
     from datetime import date
     current_year = date.today().year
+
+    for words in (ocr_result.words, cleaned_result.words):
+        found = _dob_from_anchor_words(words)
+        if found:
+            return found
 
     for text, words in [
         (ocr_result.full_text, ocr_result.words),
@@ -354,10 +464,12 @@ def _dob_broad_scan(
             val = _normalize_dob_value(
                 f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
             )
-            years = re.findall(r'\d{4}', val)
-            if years and not any(1900 <= int(y) <= current_year for y in years):
+            if not _is_plausible_dob(val):
                 continue
-            bbox = _find_bbox_in_words(val, words) or _find_bbox_in_words(m.group(0), words)
+            from securemask.utils.bbox_utils import find_date_digits_bbox
+            bbox = find_date_digits_bbox(val, words) or _find_bbox_in_words(
+                val, words, max_window=4
+            )
             logger.info("DOB anchor-scan found: %s", val)
             return DetectedField(
                 field_name='dob',
@@ -371,12 +483,14 @@ def _dob_broad_scan(
         for m in _DOB_RE.finditer(text):
             val = next(g for g in m.groups() if g)
             val = _normalize_dob_value(val)
-            years = re.findall(r'\d{4}', val)
-            if years and not any(1900 <= int(y) <= current_year for y in years):
+            if not _is_plausible_dob(val):
                 continue
             if re.fullmatch(r'\d+', val):
                 continue
-            bbox = _find_bbox_in_words(val, words)
+            from securemask.utils.bbox_utils import find_date_digits_bbox
+            bbox = find_date_digits_bbox(val, words) or _find_bbox_in_words(
+                val, words, max_window=4
+            )
             logger.info("DOB broad-scan found: %s", val)
             return DetectedField(
                 field_name='dob',
@@ -388,6 +502,209 @@ def _dob_broad_scan(
                 always_redact=False,
             )
     return None
+
+
+def _is_valid_devanagari_name(text: str) -> bool:
+    tokens = [t for t in text.split() if re.search(r"[\u0900-\u097F]{2,}", t)]
+    if len(tokens) < 2:
+        return False
+    if any(t in _NAME_HI_BLACKLIST for t in tokens):
+        return False
+    if tokens[0] in ("भारत", "सरकार", "भारतीय"):
+        return False
+    total_len = sum(len(t) for t in tokens)
+    # Prefer person names (3+ words or long 2-word Marathi/Hindi names)
+    if len(tokens) >= 3:
+        return total_len >= 10
+    return total_len >= 12 and all(len(t) >= 3 for t in tokens)
+
+
+def _name_hi_broad_scan(
+    ocr_result: OCRResult,
+    cleaned_result: OCRResult,
+    zone: str = "top",
+) -> DetectedField | None:
+    """Extract Hindi/Marathi name line via नाम anchor or longest Devanagari run."""
+    anchors = ("नाम", "name")
+    for ocr in (ocr_result, cleaned_result):
+        words = ocr.words
+        if zone in ("top", "middle", "bottom") and ocr.image_height > 0:
+            h = ocr.image_height
+            filtered = []
+            for w in ocr.words:
+                y_ratio = (w.bbox.y + w.bbox.height / 2) / h
+                if zone == "top" and y_ratio < 0.45:
+                    filtered.append(w)
+                elif zone == "middle" and 0.20 <= y_ratio < 0.80:
+                    filtered.append(w)
+                elif zone == "bottom" and y_ratio >= 0.50:
+                    filtered.append(w)
+            words = filtered
+        text = " ".join(w.text for w in words)
+        lower = text.lower()
+
+        for anchor in anchors:
+            idx = lower.find(anchor)
+            if idx >= 0:
+                after = text[idx + len(anchor) :].strip().lstrip(":：").strip()
+                m = _DEVANAGARI_NAME_RE.search(after[:80])
+                if m and _is_valid_devanagari_name(m.group()):
+                    val = m.group().strip()
+                    from securemask.utils.bbox_utils import find_devanagari_bbox
+                    bbox = find_devanagari_bbox(val, words) or _find_bbox_in_words(
+                        val.split()[0], words, max_window=min(len(val.split()) + 1, 6)
+                    )
+                    logger.info("Devanagari name via anchor '%s': %s", anchor, val)
+                    return DetectedField(
+                        field_name="name_hi",
+                        field_value=val,
+                        sensitivity_weight=5,
+                        detection_method="regex_fuzzy",
+                        confidence=0.80,
+                        bounding_box=bbox,
+                        always_redact=False,
+                    )
+
+        # Merge consecutive Devanagari OCR tokens (line often split per word)
+        merged_runs: list[str] = []
+        run: list[str] = []
+        for w in sorted(words, key=lambda x: (x.bbox.y, x.bbox.x)):
+            if re.search(r"[\u0900-\u097F]{2,}", w.text):
+                run.append(w.text)
+            elif run:
+                merged_runs.append(" ".join(run))
+                run = []
+        if run:
+            merged_runs.append(" ".join(run))
+        for cand in merged_runs:
+            if _is_valid_devanagari_name(cand):
+                from securemask.utils.bbox_utils import find_devanagari_bbox
+                bbox = find_devanagari_bbox(cand, words)
+                logger.info("Devanagari name merged tokens: %s", cand)
+                return DetectedField(
+                    field_name="name_hi",
+                    field_value=cand,
+                    sensitivity_weight=5,
+                    detection_method="regex_fuzzy",
+                    confidence=0.78,
+                    bounding_box=bbox or _find_bbox_in_words(cand.split()[0], words),
+                    always_redact=False,
+                )
+
+        best: str | None = None
+        best_score = 0
+        for m in _DEVANAGARI_NAME_RE.finditer(text):
+            cand = m.group().strip()
+            if not _is_valid_devanagari_name(cand):
+                continue
+            score = len(cand) + len(cand.split()) * 4
+            if score > best_score:
+                best_score = score
+                best = cand
+        if best:
+            from securemask.utils.bbox_utils import find_devanagari_bbox
+            bbox = find_devanagari_bbox(best, words) or _find_bbox_in_words(
+                best.split()[0], words, max_window=min(len(best.split()) + 1, 6)
+            )
+            logger.info("Devanagari name broad-scan: %s", best)
+            return DetectedField(
+                field_name="name_hi",
+                field_value=best,
+                sensitivity_weight=5,
+                detection_method="regex_fuzzy",
+                confidence=0.76,
+                bounding_box=bbox,
+                always_redact=False,
+            )
+    return None
+
+
+def _apply_doc_type_fallbacks(
+    document_type: str,
+    ocr_result: OCRResult,
+    cleaned_ocr: OCRResult,
+    results: list[DetectedField],
+    seen: set[str],
+) -> list[DetectedField]:
+    """Shared broad-scan fallbacks for all Indian ID types."""
+    id_fields = {
+        "aadhaar": "aadhaar_number",
+        "pan": "pan_number",
+        "passport": "passport_number",
+        "driving_license": "dl_number",
+        "voter_id": "epic_number",
+    }
+    id_field = id_fields.get(document_type)
+
+    if document_type == "aadhaar":
+        if id_field and id_field not in seen:
+            found = _aadhaar_number_broad_scan(ocr_result, cleaned_ocr)
+            if found:
+                results.append(found)
+                seen.add(id_field)
+    elif id_field and id_field not in seen:
+        schema = get_schema(document_type)
+        id_schema = next((s for s in schema if s.field_name == id_field), None)
+        if id_schema and id_schema.regex_pattern:
+            for src in (cleaned_ocr, ocr_result):
+                val, conf, box = _fuzzy.extract(
+                    src.full_text,
+                    id_schema.regex_pattern,
+                    id_schema.fuzzy_threshold,
+                    src.words,
+                    id_schema.anchor_keywords,
+                )
+                if val:
+                    from securemask.utils.bbox_utils import expand_digit_sequence_bbox
+                    if document_type == "aadhaar":
+                        box = expand_digit_sequence_bbox(
+                            val, src.words,
+                            image_height=ocr_result.image_height,
+                            image_width=ocr_result.image_width,
+                        ) or box
+                    results.append(DetectedField(
+                        field_name=id_field,
+                        field_value=val,
+                        sensitivity_weight=id_schema.sensitivity_weight,
+                        detection_method="regex_fuzzy",
+                        confidence=conf,
+                        bounding_box=box or BoundingBox(0, 0, 1, 1),
+                    ))
+                    seen.add(id_field)
+                    break
+
+    if "dob" not in seen:
+        found = _dob_broad_scan(ocr_result, cleaned_ocr)
+        if found:
+            results.append(found)
+            seen.add("dob")
+
+    name_zone = "top" if document_type in ("aadhaar", "pan", "passport", "driving_license") else "middle"
+    if "name_hi" not in seen:
+        found = _name_hi_broad_scan(ocr_result, cleaned_ocr, zone=name_zone)
+        if found:
+            results.append(found)
+            seen.add("name_hi")
+
+    if document_type == "aadhaar":
+        if "name" not in seen or (
+            (nf := next((r for r in results if r.field_name == "name"), None))
+            and len(nf.field_value.split()) < 3
+        ):
+            found = _aadhaar_name_near_dob_fallback(ocr_result, cleaned_ocr)
+            if found:
+                if "name" in seen:
+                    results = [r for r in results if r.field_name != "name"]
+                results.append(found)
+                seen.add("name")
+
+        if "gender" not in seen:
+            found = _aadhaar_gender_near_dob_fallback(ocr_result, cleaned_ocr)
+            if found:
+                results.append(found)
+                seen.add("gender")
+
+    return results
 
 
 def _gender_bbox_from_words(words: list[OCRWord], row_y: int, row_h: int) -> BoundingBox | None:
@@ -549,9 +866,14 @@ def _aadhaar_gender_near_dob_fallback(
 # Shared bbox helper
 # ------------------------------------------------------------------
 
-def _find_bbox_in_words(value: str, words: list[OCRWord]) -> BoundingBox:
+def _find_bbox_in_words(
+    value: str,
+    words: list[OCRWord],
+    *,
+    max_window: int | None = None,
+) -> BoundingBox:
     from securemask.utils.bbox_utils import find_bbox_in_words
-    return find_bbox_in_words(value, words)
+    return find_bbox_in_words(value, words, max_window=max_window)
 
 
 # ------------------------------------------------------------------
@@ -710,47 +1032,26 @@ class FieldExtractor:
                 )
             # endregion
 
-        # ---- Broad-scan fallbacks for Aadhaar ----
-        if document_type == 'aadhaar':
-            if 'aadhaar_number' not in seen and not qr_data:
-                found = _aadhaar_number_broad_scan(ocr_result, cleaned_ocr)
-                if found:
-                    results.append(found)
-                    seen.add('aadhaar_number')
-                    logger.info('Aadhaar number recovered via broad-scan')
-
-            if 'dob' not in seen:
-                found = _dob_broad_scan(ocr_result, cleaned_ocr)
-                if found:
-                    results.append(found)
-                    seen.add('dob')
-                    logger.info('DOB recovered via broad-scan')
-
-            if 'name' not in seen or (
-                (nf := next((r for r in results if r.field_name == 'name'), None))
-                and len(nf.field_value.split()) < 3
-            ):
-                found = _aadhaar_name_near_dob_fallback(ocr_result, cleaned_ocr)
-                if found:
-                    if 'name' in seen:
-                        results = [r for r in results if r.field_name != 'name']
-                    results.append(found)
-                    seen.add('name')
-                    logger.info('Name recovered via DOB-anchored fallback')
-
-            if 'gender' not in seen:
-                found = _aadhaar_gender_near_dob_fallback(ocr_result, cleaned_ocr)
-                if found:
-                    results.append(found)
-                    seen.add('gender')
-                    logger.info('Gender recovered via DOB-row fallback')
+        # ---- Broad-scan fallbacks (all supported ID types) ----
+        if document_type in ('aadhaar', 'pan', 'passport', 'driving_license', 'voter_id'):
+            if document_type == 'aadhaar' and qr_data:
+                pass
+            else:
+                results = _apply_doc_type_fallbacks(
+                    document_type, ocr_result, cleaned_ocr, results, seen,
+                )
+                for f in results:
+                    seen.add(f.field_name)
 
         if document_type == 'aadhaar':
             from securemask.utils.bbox_utils import expand_digit_sequence_bbox
             for field in results:
                 if field.field_name == 'aadhaar_number':
                     expanded = expand_digit_sequence_bbox(
-                        field.field_value, ocr_result.words
+                        field.field_value,
+                        ocr_result.words,
+                        image_height=ocr_result.image_height,
+                        image_width=ocr_result.image_width,
                     )
                     if expanded:
                         field.bounding_box = expanded
@@ -770,12 +1071,20 @@ class FieldExtractor:
                    )
             ]
 
-        # Normalise bounding boxes to percentages
+        # Tighten + sanity-check pixel bboxes before normalising to %
+        img_w = ocr_result.image_width or 1
+        img_h = ocr_result.image_height or 1
         for field in results:
+            if field.field_name == "dob":
+                from securemask.utils.bbox_utils import find_date_digits_bbox
+                tight = find_date_digits_bbox(field.field_value, ocr_result.words)
+                if tight:
+                    field.bounding_box = tight
+            field.bounding_box = _sanitize_field_bbox(
+                field.field_name, field.bounding_box, img_w, img_h,
+            )
             field.bounding_box_pct = _normalize_bbox_pct(
-                field.bounding_box,
-                ocr_result.image_width,
-                ocr_result.image_height,
+                field.bounding_box, img_w, img_h,
             )
 
         return results
@@ -881,25 +1190,37 @@ class FieldExtractor:
         if not value:
             return None
 
+        if schema.field_name == "name_hi" and not _is_valid_devanagari_name(value):
+            return None
+
+        if schema.field_name == "dob" and value:
+            from securemask.utils.bbox_utils import find_date_digits_bbox
+            tight = find_date_digits_bbox(value, ocr_result.words)
+            if tight:
+                bbox = tight
+
         if schema.field_name == "gender":
             value = _normalize_gender_value(value)
-            row_y, row_h = bbox.y, max(bbox.height, 28)
-            merged = _gender_bbox_from_words(ocr_result.words, row_y, row_h)
             img_w = ocr_result.image_width or 1
             img_h = ocr_result.image_height or 1
-            if merged and merged.width < img_w * 0.45 and merged.height < img_h * 0.2:
+            if bbox.width >= img_w * 0.45 or bbox.height >= img_h * 0.2:
+                bbox = BoundingBox(0, 0, 1, 1)
+            row_y, row_h = bbox.y, max(bbox.height, 28)
+            merged = _gender_bbox_from_words(ocr_result.words, row_y, row_h)
+            if merged and merged.width < img_w * 0.35 and merged.height < img_h * 0.12:
                 bbox = merged
             elif value == "Male":
-                for alias in ("male", "jale", "पुरुष", "पुरुय", "पुठप"):
-                    extra = _find_bbox_in_words(alias, ocr_result.words)
-                    if extra.width > 1:
-                        bbox = BoundingBox(
-                            min(bbox.x, extra.x),
-                            min(bbox.y, extra.y),
-                            max(bbox.x + bbox.width, extra.x + extra.width) - min(bbox.x, extra.x),
-                            max(bbox.y + bbox.height, extra.y + extra.height) - min(bbox.y, extra.y),
-                        )
+                for alias in ("male", "jale", "lale", "पुरुष", "पुरुय", "पुठप"):
+                    extra = _find_bbox_in_words(alias, ocr_result.words, max_window=1)
+                    if 1 < extra.width < img_w * 0.35:
+                        bbox = extra
                         break
+
+        if schema.field_name in ("name_hi",) and value:
+            from securemask.utils.bbox_utils import find_devanagari_bbox
+            hi_box = find_devanagari_bbox(value, ocr_result.words)
+            if hi_box:
+                bbox = hi_box
 
         return DetectedField(
             field_name=schema.field_name,

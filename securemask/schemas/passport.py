@@ -15,7 +15,16 @@ fields = [
         field_name="name",
         sensitivity_weight=5,
         extraction_method="mrz_primary_ner_fallback",
-        anchor_keywords=["surname", "given name"],
+        anchor_keywords=["surname", "given name", "name"],
+        zone="top",
+    ),
+    FieldSchema(
+        field_name="name_hi",
+        sensitivity_weight=5,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"[\u0900-\u097F]{2,}(?:\s+[\u0900-\u097F]{2,}){1,4}",
+        fuzzy_threshold=0,
+        anchor_keywords=["नाम", "name"],
         zone="top",
     ),
     FieldSchema(
@@ -24,7 +33,7 @@ fields = [
         extraction_method="mrz_primary_regex_fallback",
         regex_pattern=r"\b(0?[1-9]|[12]\d|3[01])[\/\-\.\s](0?[1-9]|1[012])[\/\-\.\s](\d{4})\b",
         fuzzy_threshold=80,
-        anchor_keywords=["date of birth", "dob"],
+        anchor_keywords=["date of birth", "dob", "जन्म", "तारीख"],
         zone="middle",
     ),
     FieldSchema(

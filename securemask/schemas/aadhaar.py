@@ -23,6 +23,16 @@ fields = [
         always_redact=False,
     ),
     FieldSchema(
+        field_name="name_hi",
+        sensitivity_weight=5,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"[\u0900-\u097F]{2,}(?:\s+[\u0900-\u097F]{2,}){1,4}",
+        fuzzy_threshold=0,
+        anchor_keywords=["नाम", "name"],
+        zone="top",
+        always_redact=False,
+    ),
+    FieldSchema(
         field_name="father_name",
         sensitivity_weight=4,
         extraction_method="qr_primary_ner_fallback",
