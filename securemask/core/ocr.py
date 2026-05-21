@@ -1,20 +1,20 @@
 """OCR engine: PaddleOCR primary → EasyOCR fallback.
 
-Architecture:
-  - PaddleOCR (English + Hindi merge) — primary, best accuracy on Indian IDs
-  - EasyOCR — fallback when PaddleOCR is unavailable
-
-Each engine receives the correct image variant:
-  - PaddleOCR: enhanced grayscale (avoids double binarization)
-  - EasyOCR: deskewed color image (its own contrast logic works best on color)
-
-Google Cloud Vision has been removed to keep the project fully offline/local.
+Root-cause fixes vs previous version:
+  - PaddleOCR 3.x (PaddleX backend) returns dict-style result objects.
+    The old parser used hasattr(res, 'rec_texts') which always failed on
+    dict objects, causing 0 words every time. Fixed with a universal
+    _extract_paddle_items() that tries dict-key → attr → legacy-list.
+  - PaddleOCR 3.x's UVDoc/orientation sub-models require a COLOR BGR
+    image. Passing enhanced_gray caused silent empty output.
+    PaddleOCR now always receives the color image.
+  - EasyOCR is now pre-warmed at module import so the first request
+    doesn't pay a 5-10s cold-start penalty.
 """
 from __future__ import annotations
 
 import logging
 import os
-import re
 import tempfile
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -30,11 +30,13 @@ from securemask.models.detected_field import BoundingBox
 
 logger = logging.getLogger(__name__)
 
+SKIP_EASYOCR_PREWARM_ENV = "SECUREMASK_SKIP_OCR_PREWARM"
+
 # ------------------------------------------------------------------
-# Thresholds / tunables
+# Thresholds
 # ------------------------------------------------------------------
 
-PADDLE_CONFIDENCE_THRESHOLD = 0.40  # lowered — PaddleOCR on Indian IDs often sits 0.5–0.7
+PADDLE_CONFIDENCE_THRESHOLD = 0.40
 PADDLE_HINDI_CONFIDENCE_THRESHOLD = 0.45
 MIN_WORDS_THRESHOLD = 3
 
@@ -61,7 +63,130 @@ class OCRResult:
 
 
 # ------------------------------------------------------------------
-# PaddleOCR — primary engine, lazy cached readers
+# PaddleOCR 3.x universal result extractor
+# ------------------------------------------------------------------
+
+def _extract_paddle_items(res) -> list[tuple[str, float, list]]:
+    """
+    Extract (text, score, polygon_points) triples from a single PaddleOCR
+    result item, handling every API variant we've seen in the wild:
+
+      A) PaddleOCR 3.x / PaddleX  — dict-like access
+            res['rec_texts'], res['rec_scores'], res['dt_polys']
+
+      B) PaddleOCR 2.8 new-style   — attribute access
+            res.rec_texts, res.rec_scores, res.dt_polys
+
+      C) PaddleOCR < 2.8 legacy    — nested list
+            [ ([pts], (text, conf)), ... ]
+    """
+    # ---------- helper: pull a value by key or attr ----------
+    def _get(obj, key, default=None):
+        try:
+            return obj[key]
+        except (KeyError, TypeError, IndexError):
+            pass
+        try:
+            return getattr(obj, key, default)
+        except Exception:
+            pass
+        return default
+
+    # ---------- A / B: structured result ----------
+    rec_texts = _get(res, "rec_texts")
+    if rec_texts is not None:
+        rec_scores = _get(res, "rec_scores") or []
+        dt_polys   = _get(res, "dt_polys")   or []
+        items = []
+        for i, text in enumerate(rec_texts):
+            text = str(text).strip()
+            if not text:
+                continue
+            conf  = float(rec_scores[i]) if i < len(rec_scores) else 0.5
+            poly  = list(dt_polys[i])    if i < len(dt_polys)   else []
+            items.append((text, conf, poly))
+        return items
+
+    # ---------- C: legacy nested list ----------
+    if isinstance(res, (list, tuple)):
+        items = []
+        for line in res:
+            if not isinstance(line, (list, tuple)) or len(line) != 2:
+                continue
+            try:
+                points, (text, conf) = line
+                text = str(text).strip()
+                if text:
+                    items.append((text, float(conf), list(points)))
+            except Exception:
+                pass
+        return items
+
+    return []
+
+
+def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
+    """Parse a PaddleOCR predict() result into OCRResult.
+
+    `result` can be a generator, a list, or a single result object.
+    Converts generators to list first so we can iterate safely.
+    """
+    if result is None:
+        return None
+
+    # Materialise generator (PaddleOCR 3.x returns a generator)
+    if hasattr(result, "__next__") or hasattr(result, "__iter__") and not isinstance(result, (list, tuple)):
+        try:
+            result = list(result)
+        except Exception as exc:
+            logger.error("PaddleOCR: failed to materialise generator: %s", exc)
+            return None
+
+    img = cv2.imread(str(image_path))
+    if img is None:
+        img = np.array(Image.open(image_path).convert("RGB"))
+    img_h, img_w = img.shape[:2]
+
+    words: list[OCRWord] = []
+    parts: list[str] = []
+
+    for res in result:
+        for text, conf, poly in _extract_paddle_items(res):
+            if poly:
+                xs = [int(p[0]) for p in poly]
+                ys = [int(p[1]) for p in poly]
+                bx, by = int(min(xs)), int(min(ys))
+                bw, bh = int(max(xs) - bx), int(max(ys) - by)
+            else:
+                bx, by, bw, bh = 0, 0, 1, 1
+            words.append(OCRWord(text=text, confidence=conf,
+                                  bbox=BoundingBox(bx, by, bw, bh)))
+            parts.append(text)
+
+    if not words:
+        # Log result structure to help debug future API changes
+        try:
+            sample = list(result)[:2] if result else []
+            logger.warning(
+                "PaddleOCR: 0 words extracted. result type=%s, sample=%s",
+                type(result).__name__,
+                [type(r).__name__ for r in sample],
+            )
+        except Exception:
+            pass
+        return None
+
+    words.sort(key=lambda w: (w.bbox.y, w.bbox.x))
+    return OCRResult(
+        full_text=" ".join(parts),
+        words=words,
+        image_width=int(img_w),
+        image_height=int(img_h),
+    )
+
+
+# ------------------------------------------------------------------
+# PaddleOCR lazy cached readers
 # ------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
@@ -73,11 +198,8 @@ def _get_paddle_reader_en():
         from paddleocr import PaddleOCR
         try:
             reader = PaddleOCR(lang="en", show_log=False, enable_mkldnn=False)
-        except Exception:
-            try:
-                reader = PaddleOCR(lang="en", enable_mkldnn=False)
-            except Exception:
-                reader = PaddleOCR(lang="en")
+        except TypeError:
+            reader = PaddleOCR(lang="en", show_log=False)
         logger.info("PaddleOCR (English) initialised")
         return reader
     except Exception as exc:
@@ -94,11 +216,8 @@ def _get_paddle_reader_hi():
         from paddleocr import PaddleOCR
         try:
             reader = PaddleOCR(lang="hi", show_log=False, enable_mkldnn=False)
-        except Exception:
-            try:
-                reader = PaddleOCR(lang="hi", enable_mkldnn=False)
-            except Exception:
-                reader = PaddleOCR(lang="hi")
+        except TypeError:
+            reader = PaddleOCR(lang="hi", show_log=False)
         logger.info("PaddleOCR (Hindi) initialised")
         return reader
     except Exception as exc:
@@ -106,77 +225,7 @@ def _get_paddle_reader_hi():
         return None
 
 
-def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
-    """Parse PaddleOCR predict() result (supports both legacy and new API)."""
-    if result is None:
-        return None
-
-    img = cv2.imread(str(image_path))
-    if img is None:
-        img = np.array(Image.open(image_path).convert("RGB"))
-    img_h, img_w = img.shape[:2]
-
-    words: list[OCRWord] = []
-    parts: list[str] = []
-
-    for res in result:
-        # ---------- New PaddleOCR API (>= 2.8 / 3.x) ----------
-        if hasattr(res, "rec_texts") and hasattr(res, "dt_polys"):
-            texts = res.rec_texts or []
-            scores = res.rec_scores or []
-            polys = res.dt_polys or []
-            for i, text in enumerate(texts):
-                text = str(text).strip()
-                if not text:
-                    continue
-                conf = float(scores[i]) if i < len(scores) else 0.5
-                if i < len(polys):
-                    poly = polys[i]
-                    xs = [int(p[0]) for p in poly]
-                    ys = [int(p[1]) for p in poly]
-                    bx, by = int(min(xs)), int(min(ys))
-                    bw, bh = int(max(xs) - bx), int(max(ys) - by)
-                else:
-                    bx, by, bw, bh = 0, 0, 1, 1
-                words.append(OCRWord(text=text, confidence=conf,
-                                     bbox=BoundingBox(bx, by, bw, bh)))
-                parts.append(text)
-            continue
-
-        # ---------- Legacy PaddleOCR API (< 2.8) ----------
-        if isinstance(res, list):
-            for line in res:
-                if not isinstance(line, (list, tuple)) or len(line) != 2:
-                    continue
-                try:
-                    points, (text, conf) = line
-                    text = str(text).strip()
-                    if not text:
-                        continue
-                    xs = [int(p[0]) for p in points]
-                    ys = [int(p[1]) for p in points]
-                    bx, by = int(min(xs)), int(min(ys))
-                    bw, bh = int(max(xs) - bx), int(max(ys) - by)
-                    words.append(OCRWord(text=text, confidence=float(conf),
-                                         bbox=BoundingBox(bx, by, bw, bh)))
-                    parts.append(text)
-                except Exception:
-                    pass
-
-    if not words:
-        return None
-
-    words.sort(key=lambda word: (word.bbox.y, word.bbox.x))
-    return OCRResult(
-        full_text=" ".join(parts),
-        words=words,
-        image_width=int(img_w),
-        image_height=int(img_h),
-    )
-
-
 def _run_paddle(reader, image_path: str) -> OCRResult | None:
-    """Run a single PaddleOCR reader and parse the result."""
     if reader is None:
         return None
     try:
@@ -188,32 +237,31 @@ def _run_paddle(reader, image_path: str) -> OCRResult | None:
 
 
 def _paddle_ocr(image_path: str, force_hindi: bool = False) -> OCRResult | None:
-    """English PaddleOCR pass; Hindi pass only when english confidence is low.
+    """Run English PaddleOCR; Hindi only when English confidence is low.
 
-    Speed optimisation: the original code always ran both languages.
-    We now run Hindi only when English avg_confidence < PADDLE_HINDI_CONFIDENCE_THRESHOLD
-    or when force_hindi=True (caller suspects Hindi content).
+    IMPORTANT: image_path must point to a COLOR (BGR/RGB) image.
+    PaddleOCR 3.x's UVDoc document-unwarping and orientation-detection
+    sub-models require color input — grayscale produces silent empty output.
     """
     result_en = _run_paddle(_get_paddle_reader_en(), image_path)
-    en_conf = result_en.avg_confidence if result_en else 0.0
+    en_conf   = result_en.avg_confidence if result_en else 0.0
 
     run_hindi = force_hindi or en_conf < PADDLE_HINDI_CONFIDENCE_THRESHOLD
     result_hi = _run_paddle(_get_paddle_reader_hi(), image_path) if run_hindi else None
 
-    # Merge: prefer English words; add non-overlapping Hindi words
     if result_en and result_hi:
-        merged_words = list(result_en.words)
+        merged = list(result_en.words)
         for hw in result_hi.words:
             overlap = any(
                 abs(hw.bbox.x - ew.bbox.x) < 20 and abs(hw.bbox.y - ew.bbox.y) < 20
                 for ew in result_en.words
             )
             if not overlap:
-                merged_words.append(hw)
-        merged_words.sort(key=lambda word: (word.bbox.y, word.bbox.x))
+                merged.append(hw)
+        merged.sort(key=lambda w: (w.bbox.y, w.bbox.x))
         return OCRResult(
-            full_text=" ".join(w.text for w in merged_words),
-            words=merged_words,
+            full_text=" ".join(w.text for w in merged),
+            words=merged,
             image_width=result_en.image_width,
             image_height=result_en.image_height,
         )
@@ -222,7 +270,7 @@ def _paddle_ocr(image_path: str, force_hindi: bool = False) -> OCRResult | None:
 
 
 # ------------------------------------------------------------------
-# EasyOCR — fallback engine
+# EasyOCR — fallback engine (pre-warmed at import)
 # ------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
@@ -231,21 +279,34 @@ def _get_easyocr_reader():
         import easyocr
         model_dir = STORAGE_DIR / "easyocr"
         model_dir.mkdir(parents=True, exist_ok=True)
-        # gpu=False keeps it cross-platform; verbose=False suppresses logs
-        return easyocr.Reader(["en", "hi"], gpu=False, verbose=False,
-                              model_storage_directory=str(model_dir))
+        reader = easyocr.Reader(["en", "hi"], gpu=False, verbose=False,
+                                model_storage_directory=str(model_dir))
+        logger.info("EasyOCR reader initialised (en+hi)")
+        return reader
     except Exception as exc:
         logger.warning("EasyOCR unavailable: %s", exc)
         return None
 
 
+def _prewarm_easyocr() -> None:
+    """Call once at startup so the first real request doesn't pay cold-start.
+
+    Runs in a background thread to avoid blocking uvicorn startup.
+    """
+    import threading
+    def _warm():
+        try:
+            _get_easyocr_reader()
+        except Exception:
+            pass
+    threading.Thread(target=_warm, daemon=True, name="easyocr-prewarm").start()
+
+
 def _split_easyocr_phrases(words: list[OCRWord]) -> list[OCRWord]:
     """Split multi-word EasyOCR phrase tokens into individual sub-word tokens.
 
-    EasyOCR often returns entire lines as a single token (e.g.
-    'जन्म तारीख DOB: 15 04 2006' as one OCRWord). This makes per-field
-    bounding boxes unreliable. We split on whitespace and interpolate
-    sub-word bboxes proportionally by character count across the parent box.
+    EasyOCR often returns entire lines as one token. We split on whitespace
+    and interpolate sub-word bboxes proportionally by character count.
     """
     result: list[OCRWord] = []
     for word in words:
@@ -253,33 +314,22 @@ def _split_easyocr_phrases(words: list[OCRWord]) -> list[OCRWord]:
         if len(sub_tokens) <= 1:
             result.append(word)
             continue
-
-        # Interpolate bbox horizontally by character count
         total_chars = max(sum(len(t) for t in sub_tokens), 1)
-        parent_x = word.bbox.x
-        parent_w = word.bbox.width
-        parent_y = word.bbox.y
-        parent_h = word.bbox.height
-
-        x_cursor = parent_x
+        x_cursor = word.bbox.x
         for token in sub_tokens:
-            token_chars = max(len(token), 1)
-            token_w = int(parent_w * token_chars / total_chars)
+            token_w = int(word.bbox.width * len(token) / total_chars)
             result.append(OCRWord(
                 text=token,
                 confidence=word.confidence,
-                bbox=BoundingBox(
-                    int(x_cursor), int(parent_y),
-                    int(token_w), int(parent_h),
-                ),
+                bbox=BoundingBox(int(x_cursor), int(word.bbox.y),
+                                 int(token_w), int(word.bbox.height)),
             ))
             x_cursor += token_w
-
     return result
 
 
 def _easyocr_fallback(image_path: str) -> OCRResult | None:
-    """Run EasyOCR on the given image path. Prefers COLOR images for best results."""
+    """EasyOCR on a COLOR image (best accuracy)."""
     reader = _get_easyocr_reader()
     if reader is None:
         return None
@@ -287,6 +337,7 @@ def _easyocr_fallback(image_path: str) -> OCRResult | None:
         img = cv2.imread(str(image_path))
         if img is None:
             img = np.array(Image.open(image_path).convert("RGB"))
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         img_h, img_w = img.shape[:2]
 
         results = reader.readtext(
@@ -302,53 +353,60 @@ def _easyocr_fallback(image_path: str) -> OCRResult | None:
             xs = [int(p[0]) for p in pts]
             ys = [int(p[1]) for p in pts]
             bx, by = int(min(xs)), int(min(ys))
-            bw, bh = int(max(xs) - bx), int(max(ys) - by)
             words.append(OCRWord(
                 text=text, confidence=float(conf),
-                bbox=BoundingBox(bx, by, bw, bh),
+                bbox=BoundingBox(bx, by, int(max(xs) - bx), int(max(ys) - by)),
             ))
             parts.append(text)
 
         if not words:
             return None
 
-        # Split merged phrase tokens into individual sub-words with interpolated bboxes
         words = _split_easyocr_phrases(words)
-
-        return OCRResult(full_text=" ".join(w.text for w in words), words=words,
-                         image_width=int(img_w), image_height=int(img_h))
+        return OCRResult(full_text=" ".join(w.text for w in words),
+                         words=words, image_width=int(img_w), image_height=int(img_h))
     except Exception as exc:
         logger.error("EasyOCR failed: %s", exc)
         return None
 
 
 # ------------------------------------------------------------------
-# Preprocessed-image temp-file helper
+# Devanagari digit normalizer
 # ------------------------------------------------------------------
 
-def _write_temp_image(arr: np.ndarray, suffix: str = ".png") -> str:
-    """Write a numpy array to a temp file and return its path.
+_DEVA_MAP = {
+    '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
+    '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
+}
 
-    Used to pass preprocessed images to OCR engines that only accept file paths.
-    """
-    fd, path = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
-    cv2.imwrite(path, arr)
-    return path
+
+def _normalize(text: str) -> str:
+    return "".join(_DEVA_MAP.get(c, c) for c in text) if text else text
 
 
 # ------------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------------
 
+# Pre-warm EasyOCR in background when module loads so first real
+# request doesn't incur cold-start latency.
+#
+# Tests and one-off scripts can opt out by setting
+# SECUREMASK_SKIP_OCR_PREWARM=1 before importing this module.
+if os.getenv(SKIP_EASYOCR_PREWARM_ENV) != "1":
+    _prewarm_easyocr()
+
+
 class OCREngine:
-    """Multi-engine OCR with preprocessed routing.
+    """PaddleOCR (primary) → EasyOCR (fallback).
 
-    PaddleOCR (en + hi)  →  EasyOCR fallback
+    Image routing — CRITICAL for PaddleOCR 3.x:
+      PaddleOCR receives the COLOR image (save_preprocessed_variants()['color']).
+      Passing grayscale to PaddleOCR 3.x causes its UVDoc / orientation
+      sub-models to return empty output silently.
 
-    Each engine receives the correct image variant:
-      - PaddleOCR: enhanced grayscale (avoids double binarization)
-      - EasyOCR: deskewed color image (its own contrast logic works best on color)
+      EasyOCR also receives the color image (its own contrast pipeline
+      works best on color).
     """
 
     def extract(
@@ -357,92 +415,67 @@ class OCREngine:
         preprocessed_color_path: str | Path | None = None,
         preprocessed_gray_path: str | Path | None = None,
     ) -> OCRResult:
-        """Run OCR with cascading fallback.
-
-        Args:
-            image_path: original uploaded file (used if preprocessed paths not given)
-            preprocessed_color_path: path to save_preprocessed_variants()['color']
-            preprocessed_gray_path:  path to save_preprocessed_variants()['enhanced_gray']
-
-        Returns:
-            Best OCRResult available.
-        """
         raw_path = str(image_path)
 
-        # Resolve which image path to hand each engine
-        paddle_path = str(preprocessed_gray_path) if preprocessed_gray_path else raw_path
-        # EasyOCR works MUCH better on color images, not grayscale/binary
-        easyocr_path = str(preprocessed_color_path) if preprocessed_color_path else raw_path
+        # Both engines get the COLOR image — see class docstring for why
+        color_path = str(preprocessed_color_path) if preprocessed_color_path else raw_path
 
-        selected_result = None
-
-        # ---- 1. PaddleOCR (primary) ----
-        paddle_result = _paddle_ocr(paddle_path)
+        # ---- 1. PaddleOCR ----
+        paddle_result = _paddle_ocr(color_path)
         if (paddle_result
                 and paddle_result.avg_confidence >= PADDLE_CONFIDENCE_THRESHOLD
                 and len(paddle_result.words) >= MIN_WORDS_THRESHOLD):
             logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
                         len(paddle_result.words), paddle_result.avg_confidence)
-            selected_result = paddle_result
-        else:
-            low_conf = paddle_result.avg_confidence if paddle_result else 0.0
-            low_words = len(paddle_result.words) if paddle_result else 0
-            logger.info("PaddleOCR below threshold (conf=%.2f, words=%d) — trying EasyOCR",
-                        low_conf, low_words)
+            return self._finalize(paddle_result)
 
-            # ---- 2. EasyOCR (fallback) ----
-            easy_result = _easyocr_fallback(easyocr_path)
-            if easy_result and easy_result.words:
-                logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
-                            len(easy_result.words), easy_result.avg_confidence)
-                selected_result = easy_result
+        low_conf  = paddle_result.avg_confidence if paddle_result else 0.0
+        low_words = len(paddle_result.words)      if paddle_result else 0
+        logger.info("PaddleOCR below threshold (conf=%.2f, words=%d) — trying EasyOCR",
+                    low_conf, low_words)
 
-                # If PaddleOCR also returned something, merge non-overlapping words
-                if paddle_result and paddle_result.words:
-                    selected_result = self._merge_results(paddle_result, easy_result)
-            else:
-                # Best-effort: return whatever we have
-                if paddle_result and paddle_result.words:
-                    logger.warning("OCR: returning partial PaddleOCR result as best-effort")
-                    selected_result = paddle_result
+        # ---- 2. EasyOCR ----
+        easy_result = _easyocr_fallback(color_path)
+        if easy_result and easy_result.words:
+            logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
+                        len(easy_result.words), easy_result.avg_confidence)
+            # If Paddle returned anything at all, merge it in
+            if paddle_result and paddle_result.words:
+                return self._finalize(self._merge(paddle_result, easy_result))
+            return self._finalize(easy_result)
 
-        if selected_result is None:
-            logger.error("All OCR engines failed for %s", image_path)
-            return OCRResult(full_text="", words=[], image_width=0, image_height=0)
+        # Best-effort
+        for candidate in (paddle_result, easy_result):
+            if candidate and candidate.words:
+                logger.warning("OCR: returning partial result as best-effort")
+                return self._finalize(candidate)
 
-        # Translate Devanagari digits U+0966 to U+096F to '0'-'9'
-        devanagari_map = {
-            '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
-            '५': '5', '६': '6', '७': '7', '८': '8', '९': '9'
-        }
+        logger.error("All OCR engines failed for %s", image_path)
+        return OCRResult(full_text="", words=[], image_width=0, image_height=0)
 
-        def normalize_text(text: str) -> str:
-            if not text:
-                return text
-            return "".join(devanagari_map.get(char, char) for char in text)
+    def _finalize(self, result: OCRResult) -> OCRResult:
+        """Normalise Devanagari digits in-place and return."""
+        result.full_text = _normalize(result.full_text)
+        for w in result.words:
+            w.text = _normalize(w.text)
+        return result
 
-        selected_result.full_text = normalize_text(selected_result.full_text)
-        for w in selected_result.words:
-            w.text = normalize_text(w.text)
-
-        return selected_result
-
-    def _merge_results(self, primary: OCRResult, secondary: OCRResult) -> OCRResult:
-        """Merge two OCR results, preferring primary words and adding non-overlapping secondary words."""
-        merged_words = list(primary.words)
+    def _merge(self, primary: OCRResult, secondary: OCRResult) -> OCRResult:
+        """Add non-overlapping secondary words to primary."""
+        merged = list(primary.words)
         for sw in secondary.words:
             overlap = any(
                 abs(sw.bbox.x - pw.bbox.x) < 25 and abs(sw.bbox.y - pw.bbox.y) < 25
                 for pw in primary.words
             )
             if not overlap:
-                merged_words.append(sw)
-        merged_words.sort(key=lambda word: (word.bbox.y, word.bbox.x))
-        logger.info("OCR merge: %d primary + %d secondary → %d total words",
-                    len(primary.words), len(secondary.words), len(merged_words))
+                merged.append(sw)
+        merged.sort(key=lambda w: (w.bbox.y, w.bbox.x))
+        logger.info("OCR merge: %d + %d → %d words",
+                    len(primary.words), len(secondary.words), len(merged))
         return OCRResult(
-            full_text=" ".join(w.text for w in merged_words),
-            words=merged_words,
+            full_text=" ".join(w.text for w in merged),
+            words=merged,
             image_width=primary.image_width or secondary.image_width,
             image_height=primary.image_height or secondary.image_height,
         )
