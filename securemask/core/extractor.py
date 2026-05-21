@@ -15,7 +15,7 @@ from PIL import Image
 from securemask.core.fuzzy_regex import FuzzyRegexExtractor
 from securemask.core.mrz import MRZParser
 from securemask.core.ner import NERExtractor
-from securemask.core.ocr import OCRResult
+from securemask.core.ocr import OCRResult, OCRWord
 from securemask.core.qr import QRDecoder
 from securemask.models.detected_field import BoundingBox, DetectedField
 from securemask.schemas import get_schema
@@ -115,13 +115,38 @@ class FieldExtractor:
             if schema.field_name in seen:
                 continue
 
+            # Apply zone-based filtering to OCR result
+            zone_ocr = self._filter_ocr_by_zone(ocr_result, schema.zone)
+
             detected = self._extract_field(
-                schema, ocr_result, image, image_path,
+                schema, zone_ocr, image, image_path,
                 qr_data, mrz_data,
             )
+            
+            # Fallback if no value detected and zone was constrained
+            if not detected and schema.zone not in ("anywhere", None):
+                detected = self._extract_field(
+                    schema, ocr_result, image, image_path,
+                    qr_data, mrz_data,
+                )
+
             if detected:
                 results.append(detected)
                 seen.add(schema.field_name)
+
+        # Collision resolution: remove father_name/spouse_name if they are identical to name
+        name_field = next((r for r in results if r.field_name == "name"), None)
+        if name_field:
+            from rapidfuzz import fuzz
+            filtered_results = []
+            for r in results:
+                if r.field_name in ("father_name", "father_husband_name", "father_spouse_name"):
+                    ratio = fuzz.ratio(r.field_value.strip().lower(), name_field.field_value.strip().lower())
+                    if ratio > 90:
+                        logger.info(f"Removing duplicate/collision field {r.field_name} (identical to name: '{r.field_value}')")
+                        continue
+                filtered_results.append(r)
+            results = filtered_results
 
         # Normalize bounding boxes to percentages
         for field in results:
@@ -260,13 +285,34 @@ class FieldExtractor:
 
         return fields
 
-    def _find_bbox_in_words(self, value: str, words) -> BoundingBox:
-        value_parts = set(re.findall(r"\w+", value.lower()))
-        matched = [w for w in words if re.sub(r"\W+", "", w.text).lower() in value_parts]
-        if matched:
-            left = min(w.bbox.x for w in matched)
-            top = min(w.bbox.y for w in matched)
-            right = max(w.bbox.x + w.bbox.width for w in matched)
-            bottom = max(w.bbox.y + w.bbox.height for w in matched)
-            return BoundingBox(left, top, right - left, bottom - top)
-        return BoundingBox(0, 0, 1, 1)
+    def _filter_ocr_by_zone(self, ocr_result: OCRResult, zone: str | None) -> OCRResult:
+        if not zone or zone not in ("top", "middle", "bottom") or ocr_result.image_height <= 0:
+            return ocr_result
+
+        h = ocr_result.image_height
+        filtered_words = []
+        for w in ocr_result.words:
+            # Calculate vertical center of the word bounding box
+            y_center = w.bbox.y + w.bbox.height / 2
+            y_ratio = y_center / h
+            
+            if zone == "top" and y_ratio < 0.45:
+                filtered_words.append(w)
+            elif zone == "middle" and 0.20 <= y_ratio < 0.80:
+                filtered_words.append(w)
+            elif zone == "bottom" and y_ratio >= 0.50:
+                filtered_words.append(w)
+
+        filtered_words.sort(key=lambda word: (word.bbox.y, word.bbox.x))
+        filtered_text = " ".join(w.text for w in filtered_words)
+        
+        return OCRResult(
+            full_text=filtered_text,
+            words=filtered_words,
+            image_width=ocr_result.image_width,
+            image_height=ocr_result.image_height,
+        )
+
+    def _find_bbox_in_words(self, value: str, words: list[OCRWord]) -> BoundingBox:
+        from securemask.utils.bbox_utils import find_bbox_in_words
+        return find_bbox_in_words(value, words)

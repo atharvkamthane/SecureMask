@@ -111,26 +111,8 @@ def _load_spacy():
 
 def _find_bbox_for_text(text: str, words: list[OCRWord]) -> BoundingBox:
     """Find bounding box of matched text among OCR words."""
-    text_parts = [p for p in re.findall(r"\w+", text.lower()) if len(p) >= 2]
-    if not text_parts:
-        text_parts = [text.lower().strip()]
-        
-    matched = []
-    for w in words:
-        w_clean = re.sub(r"\W+", "", w.text).lower()
-        if not w_clean:
-            continue
-        # If OCR word overlaps significantly with any text part
-        if any(w_clean in p or p in w_clean for p in text_parts):
-            matched.append(w)
-            
-    if matched:
-        left = min(w.bbox.x for w in matched)
-        top = min(w.bbox.y for w in matched)
-        right = max(w.bbox.x + w.bbox.width for w in matched)
-        bottom = max(w.bbox.y + w.bbox.height for w in matched)
-        return BoundingBox(left, top, right - left, bottom - top)
-    return BoundingBox(0, 0, 1, 1)
+    from securemask.utils.bbox_utils import find_bbox_in_words
+    return find_bbox_in_words(text, words)
 
 
 def _keyword_proximity(entity_text: str, entity_start: int, text: str, keywords: list[str]) -> float:
@@ -190,7 +172,7 @@ class NERExtractor:
                 ent_group = ent.get("entity_group", "")
                 if ent_group in target_types:
                     value = ent.get("word", "").strip()
-                    if field_name in ("name", "father_name") and _is_blacklisted_name(value):
+                    if field_name in ("name", "father_name", "father_husband_name", "father_spouse_name") and _is_blacklisted_name(value):
                         continue
                     score = ent.get("score", 0.5)
                     proximity = _keyword_proximity(value, ent.get("start", 0), text, keywords)
@@ -211,7 +193,7 @@ class NERExtractor:
             candidates = []
             for ent in doc.ents:
                 if ent.label_ in target_types:
-                    if field_name in ("name", "father_name") and _is_blacklisted_name(ent.text):
+                    if field_name in ("name", "father_name", "father_husband_name", "father_spouse_name") and _is_blacklisted_name(ent.text):
                         continue
                     if field_name == "address" and not _is_valid_address(ent.text):
                         continue
@@ -253,15 +235,31 @@ class NERExtractor:
                         bbox = _find_bbox_for_text(value, words)
                         return value, 0.55, bbox
                 else:
-                    parts = after.split()[:5]
-                    # Filter skip words
                     skip = {"name", "dob", "date", "of", "birth", "gender", "sex",
                             "address", "government", "india", "uid", "male", "female",
-                            "no", "number"}
-                    parts = [p for p in parts if p.lower() not in skip]
+                            "no", "number", "father", "husband", "spouse", "mother",
+                            "relation", "signature", "photo", "card", "yob", "year",
+                            "s/o", "d/o", "w/o", "c/o"}
+                    parts = []
+                    for word in after.split():
+                        word_clean = word.strip(":,.-()[]{}\"'/")
+                        # Stop if word contains a digit (numeric value / date sequence)
+                        if any(c.isdigit() for c in word):
+                            break
+                        # Stop if word contains colon or slash
+                        if ":" in word or "/" in word:
+                            break
+                        # Stop if lowercase word or clean word is in the skip list
+                        if word.lower() in skip or word_clean.lower() in skip:
+                            break
+                        parts.append(word)
+                        # Cap at 5 words for name etc.
+                        if len(parts) >= 5:
+                            break
+
                     if parts:
-                        value = " ".join(parts)
-                        if field_name in ("name", "father_name") and _is_blacklisted_name(value):
+                        value = " ".join(parts).strip(":,.-()[]{}\"'/ ")
+                        if field_name in ("name", "father_name", "father_husband_name", "father_spouse_name") and _is_blacklisted_name(value):
                             continue
                         bbox = _find_bbox_for_text(value, words)
                         return value, 0.55, bbox

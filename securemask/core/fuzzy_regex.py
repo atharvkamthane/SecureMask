@@ -24,6 +24,64 @@ class FuzzyCandidate:
 class FuzzyRegexExtractor:
     """Extract field values using regex with fuzzy fallback."""
 
+    def _calculate_proximity_score(self, match_start: int, match_end: int, text: str, anchor_keywords: list[str]) -> float:
+        import math
+        if not anchor_keywords:
+            return 1.0
+            
+        text_lower = text.lower()
+        min_dist = float('inf')
+        best_dir_bonus = 1.0
+        
+        for kw in anchor_keywords:
+            kw_lower = kw.lower()
+            for kw_match in re.finditer(re.escape(kw_lower), text_lower):
+                kw_start = kw_match.start()
+                kw_end = kw_match.end()
+                
+                if kw_end <= match_start:
+                    dist = match_start - kw_end
+                    direction_bonus = 1.2  # favor labels preceding values
+                elif match_end <= kw_start:
+                    dist = kw_start - match_end
+                    direction_bonus = 0.8  # slightly penalize labels succeeding values
+                else:
+                    dist = 0
+                    direction_bonus = 1.5
+                    
+                if dist < min_dist:
+                    min_dist = dist
+                    best_dir_bonus = direction_bonus
+                    
+        if min_dist == float('inf'):
+            return 0.0
+            
+        return math.exp(-min_dist / 60.0) * best_dir_bonus
+
+    def _word_proximity_score(self, words: list[OCRWord], candidate_start_idx: int, candidate_end_idx: int, anchor_keywords: list[str]) -> float:
+        import math
+        if not anchor_keywords:
+            return 1.0
+            
+        min_dist = float('inf')
+        for idx, w in enumerate(words):
+            w_lower = w.text.lower()
+            for kw in anchor_keywords:
+                if kw.lower() in w_lower or w_lower in kw.lower():
+                    if idx < candidate_start_idx:
+                        dist = candidate_start_idx - idx
+                    elif idx > candidate_end_idx:
+                        dist = idx - candidate_end_idx
+                    else:
+                        dist = 0
+                    if dist < min_dist:
+                        min_dist = dist
+                        
+        if min_dist == float('inf'):
+            return 0.0
+            
+        return math.exp(-min_dist / 12.0)
+
     def extract(self, text: str, pattern: str, threshold: int,
                 words: list[OCRWord], anchor_keywords: list[str]
                 ) -> tuple[str | None, float, BoundingBox | None]:
@@ -31,42 +89,68 @@ class FuzzyRegexExtractor:
 
         Returns (value, confidence, bounding_box) or (None, 0.0, None).
         """
-        # Step 1: Try exact regex
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            # If the regex has capturing groups, try to reconstruct a cleaner value
-            if match.lastindex and match.lastindex >= 3:
-                # Date pattern: group(1)/group(2)/group(3) = DD/MM/YYYY
-                try:
-                    value = f"{match.group(1)}/{match.group(2)}/{match.group(3)}"
-                except IndexError:
-                    value = match.group()
-            elif match.lastindex and match.lastindex >= 1:
-                value = match.group(1)
-            else:
-                value = match.group()
-            value = value.strip()
-            bbox = self._find_bbox(value, words)
-            return value, 0.95, bbox
+        # Step 1: Try exact regex with proximity ranking
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        if matches:
+            best_match_val = None
+            best_prox_score = -1.0
+            
+            for m in matches:
+                if m.lastindex and m.lastindex >= 3:
+                    try:
+                        val = f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
+                    except IndexError:
+                        val = m.group()
+                elif m.lastindex and m.lastindex >= 1:
+                    val = m.group(1)
+                else:
+                    val = m.group()
+                val = val.strip()
+                
+                prox_score = self._calculate_proximity_score(m.start(), m.end(), text, anchor_keywords)
+                if prox_score > best_prox_score:
+                    best_prox_score = prox_score
+                    best_match_val = val
+                    
+            if best_match_val and (not anchor_keywords or best_prox_score > 0.15):
+                bbox = self._find_bbox(best_match_val, words)
+                confidence = 0.95 if not anchor_keywords else min(0.70 + best_prox_score * 0.28, 0.98)
+                return best_match_val, confidence, bbox
 
         # Step 2: Sliding window fuzzy match on OCR words
         candidates = self._sliding_window_candidates(words)
         template = self._generate_template(pattern)
 
-        best_match = None
-        best_score = 0.0
+        best_candidate = None
+        best_combined_score = 0.0
+        best_prox = 1.0
 
         for candidate in candidates:
             cleaned = re.sub(r"\s+", "", candidate.text)
             if not cleaned:
                 continue
-            score = fuzz.ratio(cleaned, template)
-            if score > threshold and score > best_score:
-                best_match = candidate
-                best_score = score
+            ratio = fuzz.ratio(cleaned, template)
+            if ratio > threshold:
+                # Find candidate index range in words
+                start_idx = 0
+                end_idx = 0
+                if candidate.words:
+                    try:
+                        start_idx = words.index(candidate.words[0])
+                        end_idx = words.index(candidate.words[-1])
+                    except ValueError:
+                        pass
+                
+                prox = self._word_proximity_score(words, start_idx, end_idx, anchor_keywords)
+                combined = ratio * 0.7 + (prox * 30.0)
+                if combined > best_combined_score:
+                    best_candidate = candidate
+                    best_combined_score = combined
+                    best_prox = prox
 
-        if best_match and best_score > threshold:
-            return best_match.text, best_score / 100, best_match.bbox
+        if best_candidate and (best_combined_score - 30.0 * (1.0 - best_prox if anchor_keywords else 0.0)) > threshold:
+            raw_ratio = fuzz.ratio(re.sub(r"\s+", "", best_candidate.text), template)
+            return best_candidate.text, raw_ratio / 100, best_candidate.bbox
 
         # Step 3: Keyword-anchored search
         return self._keyword_anchor_extract(text, words, anchor_keywords, pattern)
@@ -108,28 +192,8 @@ class FuzzyRegexExtractor:
 
     def _find_bbox(self, value: str, words: list[OCRWord]) -> BoundingBox:
         """Find bounding box for a matched value among OCR words."""
-        value_parts = [p for p in re.findall(r"\w+", value.lower()) if len(p) >= 2]
-        if not value_parts:
-            value_parts = [value.lower().strip()]
-            
-        matched = []
-        for w in words:
-            w_clean = re.sub(r"\W+", "", w.text).lower()
-            if not w_clean:
-                continue
-            # If OCR word overlaps significantly with any value part
-            if any(w_clean in p or p in w_clean for p in value_parts):
-                matched.append(w)
-                
-        if matched:
-            left = min(w.bbox.x for w in matched)
-            top = min(w.bbox.y for w in matched)
-            right = max(w.bbox.x + w.bbox.width for w in matched)
-            bottom = max(w.bbox.y + w.bbox.height for w in matched)
-            return BoundingBox(left, top, right - left, bottom - top)
-        
-        # If absolutely nothing matched, fallback to a small box (which unfortunately means no visual redaction)
-        return BoundingBox(0, 0, 1, 1)
+        from securemask.utils.bbox_utils import find_bbox_in_words
+        return find_bbox_in_words(value, words)
 
     def _keyword_anchor_extract(self, text: str, words: list[OCRWord],
                                  keywords: list[str], pattern: str
@@ -139,9 +203,9 @@ class FuzzyRegexExtractor:
         for kw in keywords:
             idx = text_lower.find(kw.lower())
             if idx >= 0:
-                # Extract text after the keyword
+                # Extract text after the keyword and restrict it to nearby region
                 after = text[idx + len(kw):].strip().lstrip(":").strip()
-                match = re.search(pattern, after, re.IGNORECASE)
+                match = re.search(pattern, after[:60], re.IGNORECASE)
                 if match:
                     value = match.group()
                     bbox = self._find_bbox(value, words)

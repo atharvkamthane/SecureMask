@@ -37,7 +37,7 @@ fields = [
         sensitivity_weight=4,
         extraction_method="qr_primary_regex_fallback",
         # Relaxed regex: handles OCR concatenation like "DOB:15/04/2006" and "DOB: 15/04/2006"
-        regex_pattern=r"(?:^|[\s:\/])(0?[1-9]|[12]\d|3[01])[\/\-](0?[1-9]|1[012])[\/\-](\d{4})(?:$|[\s,])",
+        regex_pattern=r"(?:^|[\s:\/])(0?[1-9]|[12]\d|3[01])[\/\-\.\s](0?[1-9]|1[012])[\/\-\.\s](\d{4})(?:$|[\s,])",
         fuzzy_threshold=75,
         anchor_keywords=["dob", "date of birth", "जन्म तिथि", "जन्म तारीख",
                          "year of birth", "yob", "birth"],

@@ -218,7 +218,10 @@ def _get_paddle_reader_en():
         os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
         os.environ["FLAGS_use_mkldnn"] = "0"
         from paddleocr import PaddleOCR
-        reader = PaddleOCR(lang="en", show_log=False)
+        try:
+            reader = PaddleOCR(lang="en", show_log=False)
+        except Exception:
+            reader = PaddleOCR(lang="en")
         logger.info("PaddleOCR (English) initialised")
         return reader
     except Exception as exc:
@@ -232,7 +235,10 @@ def _get_paddle_reader_hi():
         os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
         os.environ["FLAGS_use_mkldnn"] = "0"
         from paddleocr import PaddleOCR
-        reader = PaddleOCR(lang="hi", show_log=False)
+        try:
+            reader = PaddleOCR(lang="hi", show_log=False)
+        except Exception:
+            reader = PaddleOCR(lang="hi")
         logger.info("PaddleOCR (Hindi) initialised")
         return reader
     except Exception as exc:
@@ -464,41 +470,62 @@ class OCREngine:
         paddle_path = str(preprocessed_gray_path)  if preprocessed_gray_path  else raw_path
         easyocr_path = str(preprocessed_gray_path) if preprocessed_gray_path  else raw_path
 
+        selected_result = None
+
         # ---- 1. Google Cloud Vision (primary) ----
         vision_result = _google_vision_ocr(vision_path)
         if vision_result and len(vision_result.words) >= MIN_WORDS_THRESHOLD:
             logger.info("OCR engine: Google Vision — %d words @ conf %.2f",
                         len(vision_result.words), vision_result.avg_confidence)
-            return vision_result
+            selected_result = vision_result
+        else:
+            logger.info("Google Vision skipped/failed — trying PaddleOCR")
 
-        logger.info("Google Vision skipped/failed — trying PaddleOCR")
+            # ---- 2. PaddleOCR (fallback 1) ----
+            paddle_result = _paddle_ocr(paddle_path)
+            if (paddle_result
+                    and paddle_result.avg_confidence >= PADDLE_CONFIDENCE_THRESHOLD
+                    and len(paddle_result.words) >= MIN_WORDS_THRESHOLD):
+                logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
+                            len(paddle_result.words), paddle_result.avg_confidence)
+                selected_result = paddle_result
+            else:
+                low_conf = paddle_result.avg_confidence if paddle_result else 0.0
+                low_words = len(paddle_result.words) if paddle_result else 0
+                logger.info("PaddleOCR below threshold (conf=%.2f, words=%d) — trying EasyOCR",
+                            low_conf, low_words)
 
-        # ---- 2. PaddleOCR (fallback 1) ----
-        paddle_result = _paddle_ocr(paddle_path)
-        if (paddle_result
-                and paddle_result.avg_confidence >= PADDLE_CONFIDENCE_THRESHOLD
-                and len(paddle_result.words) >= MIN_WORDS_THRESHOLD):
-            logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
-                        len(paddle_result.words), paddle_result.avg_confidence)
-            return paddle_result
+                # ---- 3. EasyOCR (fallback 2) ----
+                easy_result = _easyocr_fallback(easyocr_path)
+                if easy_result and easy_result.words:
+                    logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
+                                len(easy_result.words), easy_result.avg_confidence)
+                    selected_result = easy_result
+                else:
+                    # ---- Best-effort: return whatever we have ----
+                    for candidate in (vision_result, paddle_result, easy_result):
+                        if candidate and candidate.words:
+                            logger.warning("OCR: returning partial result from best-effort fallback")
+                            selected_result = candidate
+                            break
 
-        low_conf = paddle_result.avg_confidence if paddle_result else 0.0
-        low_words = len(paddle_result.words) if paddle_result else 0
-        logger.info("PaddleOCR below threshold (conf=%.2f, words=%d) — trying EasyOCR",
-                    low_conf, low_words)
+        if selected_result is None:
+            logger.error("All OCR engines failed for %s", image_path)
+            return OCRResult(full_text="", words=[], image_width=0, image_height=0)
 
-        # ---- 3. EasyOCR (fallback 2) ----
-        easy_result = _easyocr_fallback(easyocr_path)
-        if easy_result and easy_result.words:
-            logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
-                        len(easy_result.words), easy_result.avg_confidence)
-            return easy_result
+        # Translate Devanagari digits U+0966 to U+096F to '0'-'9'
+        devanagari_map = {
+            '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
+            '५': '5', '६': '6', '७': '7', '८': '8', '९': '9'
+        }
+        
+        def normalize_text(text: str) -> str:
+            if not text:
+                return text
+            return "".join(devanagari_map.get(char, char) for char in text)
 
-        # ---- Best-effort: return whatever we have ----
-        for candidate in (vision_result, paddle_result, easy_result):
-            if candidate and candidate.words:
-                logger.warning("OCR: returning partial result from best-effort fallback")
-                return candidate
+        selected_result.full_text = normalize_text(selected_result.full_text)
+        for w in selected_result.words:
+            w.text = normalize_text(w.text)
 
-        logger.error("All OCR engines failed for %s", image_path)
-        return OCRResult(full_text="", words=[], image_width=0, image_height=0)
+        return selected_result

@@ -171,19 +171,30 @@ async def upload_document(file: UploadFile = File(...),
     processable_path = proc_dir / "preprocessed.png"
 
     try:
-        binary, color, pil_color = preprocess(original_path)
-        import cv2
-        cv2.imwrite(str(processable_path), binary)
+        from securemask.core.preprocessor import save_preprocessed_variants
+        variants = save_preprocessed_variants(original_path, proc_dir)
+        # Copy binary to preprocessed.png for frontend compatibility
+        import shutil
+        shutil.copy(str(variants["binary"]), str(processable_path))
+        
+        # Load PIL image for classifier (which should be the deskewed color variant)
+        from PIL import Image
+        pil_color = Image.open(variants["color"])
     except Exception as exc:
         logger.error("Preprocessing failed: %s", exc)
         # Use original as fallback
         from PIL import Image
         pil_color = Image.open(original_path).convert("RGB")
         pil_color.save(processable_path, "PNG")
+        variants = {}
 
     # OCR
     ocr_engine = _get_ocr()
-    ocr_result = ocr_engine.extract(str(processable_path))
+    ocr_result = ocr_engine.extract(
+        str(processable_path),
+        preprocessed_color_path=variants.get("color"),
+        preprocessed_gray_path=variants.get("enhanced_gray"),
+    )
 
     # Classify
     classifier = _get_classifier()
@@ -271,9 +282,14 @@ async def redact_document(request: RedactRequest):
     redact_dir = REDACTED_DIR / request.scan_id
     redact_dir.mkdir(parents=True, exist_ok=True)
     redacted_path = redact_dir / "redacted.png"
-    original_path = row["original_file_path"]
+    # Try using preprocessed color image so coordinates match perfectly
+    preprocessed_color = Path(row["processable_image_path"]).parent / "color.jpg"
+    if preprocessed_color.exists():
+        redaction_source = preprocessed_color
+    else:
+        redaction_source = Path(row["original_file_path"])
 
-    redact_image(original_path, fields, redacted_path, request.decisions)
+    redact_image(redaction_source, fields, redacted_path, request.decisions)
 
     # Generate audit report
     audit = generate_audit_report(
