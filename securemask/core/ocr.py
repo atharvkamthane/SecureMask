@@ -37,27 +37,6 @@ logger = logging.getLogger(__name__)
 
 SKIP_EASYOCR_PREWARM_ENV = "SECUREMASK_SKIP_OCR_PREWARM"
 
-# region agent log
-def _agent_dbg_ocr(location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    import json
-    import time
-    from pathlib import Path
-    try:
-        entry = {
-            "sessionId": "edb17e",
-            "runId": "post-fix",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        log_path = Path(__file__).resolve().parents[2] / "debug-edb17e.log"
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-# endregion
 
 # ------------------------------------------------------------------
 # Thresholds
@@ -95,6 +74,10 @@ class OCRResult:
 
 def _box_from_points(poly) -> tuple[int, int, int, int]:
     """Return x, y, width, height from polygon or [x1,y1,x2,y2] box."""
+    if poly is None:
+        return 0, 0, 1, 1
+    if hasattr(poly, "tolist"):
+        poly = poly.tolist()
     if not poly:
         return 0, 0, 1, 1
     flat = poly[0] if poly and isinstance(poly[0], (list, tuple)) and len(poly) == 1 else poly
@@ -133,7 +116,10 @@ def _extract_paddle_word_items(res) -> list[tuple[str, float, list]]:
         conf = float(line_scores[line_idx]) if line_idx < len(line_scores) else 0.75
         if not isinstance(words, (list, tuple)):
             continue
-        box_list = boxes if isinstance(boxes, (list, tuple)) else []
+        if hasattr(boxes, "tolist"):
+            box_list = boxes.tolist()
+        else:
+            box_list = boxes if isinstance(boxes, (list, tuple)) else []
         for word_idx, token in enumerate(words):
             text = str(token).strip()
             if not text:
@@ -180,7 +166,11 @@ def _extract_paddle_items(res) -> list[tuple[str, float, list]]:
             if not text:
                 continue
             conf  = float(rec_scores[i]) if i < len(rec_scores) else 0.5
-            poly  = list(dt_polys[i])    if i < len(dt_polys)   else []
+            poly  = dt_polys[i]
+            if hasattr(poly, "tolist"):
+                poly = poly.tolist()
+            else:
+                poly = list(poly) if poly is not None else []
             items.append((text, conf, poly))
         return items
 
@@ -194,7 +184,12 @@ def _extract_paddle_items(res) -> list[tuple[str, float, list]]:
                 points, (text, conf) = line
                 text = str(text).strip()
                 if text:
-                    items.append((text, float(conf), list(points)))
+                    poly = points
+                    if hasattr(poly, "tolist"):
+                        poly = poly.tolist()
+                    else:
+                        poly = list(poly) if poly is not None else []
+                    items.append((text, float(conf), poly))
             except Exception:
                 pass
         return items
@@ -212,7 +207,7 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
         return None
 
     # Materialise generator (PaddleOCR 3.x returns a generator)
-    if hasattr(result, "__next__") or hasattr(result, "__iter__") and not isinstance(result, (list, tuple)):
+    if hasattr(result, "__next__") or (hasattr(result, "__iter__") and not isinstance(result, (list, tuple))):
         try:
             result = list(result)
         except Exception as exc:
@@ -312,14 +307,6 @@ def _run_paddle(reader, image_path: str) -> OCRResult | None:
         return _parse_paddle_result(raw, image_path)
     except Exception as exc:
         logger.error("PaddleOCR predict() failed: %s", exc)
-        # region agent log
-        _agent_dbg_ocr(
-            "ocr.py:_run_paddle",
-            "paddle_predict_failed",
-            {"error": str(exc)[:200], "image": str(image_path)[-80:]},
-            "H7",
-        )
-        # endregion
         return None
 
 
@@ -533,68 +520,24 @@ class OCREngine:
             and len(paddle_result.words) >= MIN_WORDS_THRESHOLD
         )
 
-        # ---- 2. EasyOCR (word-level boxes; also fallback when Paddle fails) ----
-        easy_result = _easyocr_fallback(color_path)
-
         if paddle_ok:
-            final = paddle_result
-            engine = "paddle"
-            if easy_result and len(easy_result.words) > len(paddle_result.words):
-                final = OCRResult(
-                    full_text=paddle_result.full_text or easy_result.full_text,
-                    words=easy_result.words,
-                    image_width=paddle_result.image_width or easy_result.image_width,
-                    image_height=paddle_result.image_height or easy_result.image_height,
-                )
-                engine = "paddle_text+easyocr_boxes"
             logger.info(
-                "OCR engine: %s — %d words @ conf %.2f",
-                engine, len(final.words), final.avg_confidence,
+                "OCR engine: paddle — %d words @ conf %.2f",
+                len(paddle_result.words), paddle_result.avg_confidence,
             )
-            # region agent log
-            _agent_dbg_ocr(
-                "ocr.py:extract",
-                "engine_selected",
-                {
-                    "engine": engine,
-                    "words": len(final.words),
-                    "conf": round(final.avg_confidence, 3),
-                    "preview": final.full_text[:200],
-                },
-                "H7",
-            )
-            # endregion
-            return self._finalize(final)
+            return self._finalize(paddle_result)
+
+        # ---- 2. EasyOCR (fallback when Paddle fails) ----
+        easy_result = _easyocr_fallback(color_path)
 
         low_conf  = paddle_result.avg_confidence if paddle_result else 0.0
         low_words = len(paddle_result.words)      if paddle_result else 0
         logger.info("PaddleOCR unavailable (conf=%.2f, words=%d) — using EasyOCR",
                     low_conf, low_words)
-        # region agent log
-        _agent_dbg_ocr(
-            "ocr.py:extract",
-            "paddle_skipped",
-            {"conf": round(low_conf, 3), "words": low_words},
-            "H7",
-        )
-        # endregion
 
         if easy_result and easy_result.words:
             logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
                         len(easy_result.words), easy_result.avg_confidence)
-            # region agent log
-            _agent_dbg_ocr(
-                "ocr.py:extract",
-                "engine_selected",
-                {
-                    "engine": "easyocr",
-                    "words": len(easy_result.words),
-                    "conf": round(easy_result.avg_confidence, 3),
-                    "preview": easy_result.full_text[:200],
-                },
-                "H7",
-            )
-            # endregion
             return self._finalize(easy_result)
 
         # Best-effort
@@ -613,22 +556,4 @@ class OCREngine:
             w.text = _normalize(w.text)
         return result
 
-    def _merge(self, primary: OCRResult, secondary: OCRResult) -> OCRResult:
-        """Add non-overlapping secondary words to primary."""
-        merged = list(primary.words)
-        for sw in secondary.words:
-            overlap = any(
-                abs(sw.bbox.x - pw.bbox.x) < 25 and abs(sw.bbox.y - pw.bbox.y) < 25
-                for pw in primary.words
-            )
-            if not overlap:
-                merged.append(sw)
-        merged.sort(key=lambda w: (w.bbox.y, w.bbox.x))
-        logger.info("OCR merge: %d + %d → %d words",
-                    len(primary.words), len(secondary.words), len(merged))
-        return OCRResult(
-            full_text=" ".join(w.text for w in merged),
-            words=merged,
-            image_width=primary.image_width or secondary.image_width,
-            image_height=primary.image_height or secondary.image_height,
-        )
+    # _merge method removed as dead code

@@ -21,27 +21,7 @@ IDENTIFIER_FIELDS = {
     "aadhaar_number", "pan_number", "passport_number", "dl_number", "epic_number",
 }
 
-# region agent log
-def _agent_dbg_redact(location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    import json
-    import time
-    from pathlib import Path
-    try:
-        entry = {
-            "sessionId": "edb17e",
-            "runId": "post-fix",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        log_path = Path(__file__).resolve().parents[2] / "debug-edb17e.log"
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-# endregion
+
 
 
 class Redactor:
@@ -140,18 +120,7 @@ class Redactor:
                 )
                 draw.rectangle([x, y, max(x, x2 - visible_width), y2], fill=fill)
 
-            # region agent log
-            _agent_dbg_redact(
-                "redactor.py:redact",
-                "field_applied",
-                {
-                    "field": field.field_name,
-                    "decision": decision,
-                    "box": [x, y, x2 - x, y2 - y],
-                },
-                "H8",
-            )
-            # endregion
+
 
         return img
 

@@ -15,7 +15,8 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    with get_connection() as connection:
+    connection = get_connection()
+    try:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS scans (
@@ -69,3 +70,5 @@ def init_db() -> None:
             """
         )
         connection.commit()
+    finally:
+        connection.close()

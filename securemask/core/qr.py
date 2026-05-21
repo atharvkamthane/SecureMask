@@ -6,6 +6,7 @@ parses XML (handles both raw XML and zlib-compressed newer format).
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 import zlib
 
@@ -40,17 +41,21 @@ class QRDecoder:
             # Try direct XML parse
             root = None
             try:
-                root = ET.fromstring(raw)
+                # Strip DOCTYPE to prevent XXE attacks
+                clean_raw = re.sub(b'<!DOCTYPE[^>]*>', b'', raw, flags=re.IGNORECASE)
+                root = ET.fromstring(clean_raw)
             except ET.ParseError:
                 # Try decompressing (newer Aadhaar QR is zlib compressed)
                 try:
                     decompressed = zlib.decompress(raw, -zlib.MAX_WBITS)
-                    root = ET.fromstring(decompressed)
+                    clean_decompressed = re.sub(b'<!DOCTYPE[^>]*>', b'', decompressed, flags=re.IGNORECASE)
+                    root = ET.fromstring(clean_decompressed)
                 except Exception:
                     # Try with different wbits
                     try:
                         decompressed = zlib.decompress(raw)
-                        root = ET.fromstring(decompressed)
+                        clean_decompressed = re.sub(b'<!DOCTYPE[^>]*>', b'', decompressed, flags=re.IGNORECASE)
+                        root = ET.fromstring(clean_decompressed)
                     except Exception:
                         logger.debug("QR data is not parseable XML")
                         return None

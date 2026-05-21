@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from PIL import Image
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 from pydantic import BaseModel
@@ -158,11 +160,22 @@ async def upload_document(file: UploadFile = File(...),
     scan_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
 
+    # Read and validate file content
+    content = await file.read()
+    MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(413, "File too large. Maximum size is 20 MB.")
+
+    safe_filename = PurePosixPath(file.filename).name or "upload"
+    ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
+    file_ext = PurePosixPath(safe_filename).suffix.lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported file type '{file_ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+
     # Save uploaded file
     upload_dir = UPLOAD_DIR / scan_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    original_path = upload_dir / file.filename
-    content = await file.read()
+    original_path = upload_dir / safe_filename
     original_path.write_bytes(content)
 
     # Preprocess
@@ -174,16 +187,13 @@ async def upload_document(file: UploadFile = File(...),
         from securemask.core.preprocessor import save_preprocessed_variants
         variants = save_preprocessed_variants(original_path, proc_dir)
         # Copy binary to preprocessed.png for frontend compatibility
-        import shutil
         shutil.copy(str(variants["binary"]), str(processable_path))
         
         # Load PIL image for classifier (which should be the deskewed color variant)
-        from PIL import Image
         pil_color = Image.open(variants["color"])
     except Exception as exc:
         logger.error("Preprocessing failed: %s", exc)
         # Use original as fallback
-        from PIL import Image
         pil_color = Image.open(original_path).convert("RGB")
         pil_color.save(processable_path, "PNG")
         variants = {}
@@ -228,7 +238,7 @@ async def upload_document(file: UploadFile = File(...),
     needs_review_count = sum(1 for f in detected_fields if f.needs_review)
 
     # Save to DB
-    _save_scan(scan_id, timestamp, file.filename, classification.document_type,
+    _save_scan(scan_id, timestamp, safe_filename, classification.document_type,
                classification.confidence, context, str(original_path),
                str(processable_path), ocr_result.full_text, detected_fields,
                pei_before, needs_review_count)
@@ -244,7 +254,7 @@ async def upload_document(file: UploadFile = File(...),
         needs_review_count=needs_review_count,
         raw_text=ocr_result.full_text,
         recommendation_summary=summarize_recommendations(detected_fields),
-        original_file_url=f"/files/uploads/{scan_id}/{file.filename}",
+        original_file_url=f"/files/uploads/{scan_id}/{safe_filename}",
         processable_image_url=(
             f"/files/processed/{scan_id}/color.jpg"
             if (proc_dir / "color.jpg").exists()
@@ -259,63 +269,66 @@ async def upload_document(file: UploadFile = File(...),
 async def redact_document(request: RedactRequest):
     """Apply redaction and compute post-redaction PEI."""
     conn = get_connection()
-    row = conn.execute("SELECT * FROM scans WHERE scan_id = ?", (request.scan_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "Scan not found")
+    try:
+        row = conn.execute("SELECT * FROM scans WHERE scan_id = ?", (request.scan_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Scan not found")
 
-    # Reconstruct fields
-    fields_data = json.loads(row["detected_fields_json"])
-    fields = [DetectedField.from_dict(f) for f in fields_data]
+        # Reconstruct fields
+        fields_data = json.loads(row["detected_fields_json"])
+        fields = [DetectedField.from_dict(f) for f in fields_data]
 
-    # Apply decisions
-    for field in fields:
-        decision = request.decisions.get(field.field_name, "allow")
-        if field.always_redact:
-            decision = "redact"
-        field.redaction_decision = decision
+        # Apply decisions
+        for field in fields:
+            decision = request.decisions.get(field.field_name, "allow")
+            if field.always_redact:
+                decision = "redact"
+            field.redaction_decision = decision
 
-    # Necessity results
-    context = row["declared_context"]
-    doc_type = row["document_type"]
-    necessity_results = {f.field_name: check_necessity(doc_type, f.field_name, context) for f in fields}
+        # Necessity results
+        context = row["declared_context"]
+        doc_type = row["document_type"]
+        necessity_results = {f.field_name: check_necessity(doc_type, f.field_name, context) for f in fields}
 
-    # PEI after
-    pei_after = compute_pei_after_redaction(fields, necessity_results, request.decisions)
+        # PEI after
+        pei_after = compute_pei_after_redaction(fields, necessity_results, request.decisions)
 
-    # Redact image
-    redact_dir = REDACTED_DIR / request.scan_id
-    redact_dir.mkdir(parents=True, exist_ok=True)
-    redacted_path = redact_dir / "redacted.png"
-    # Try using preprocessed color image so coordinates match perfectly
-    preprocessed_color = Path(row["processable_image_path"]).parent / "color.jpg"
-    if preprocessed_color.exists():
-        redaction_source = preprocessed_color
-    else:
-        redaction_source = Path(row["original_file_path"])
+        # Redact image
+        redact_dir = REDACTED_DIR / request.scan_id
+        redact_dir.mkdir(parents=True, exist_ok=True)
+        redacted_path = redact_dir / "redacted.png"
+        # Try using preprocessed color image so coordinates match perfectly
+        preprocessed_color = Path(row["processable_image_path"]).parent / "color.jpg"
+        if preprocessed_color.exists():
+            redaction_source = preprocessed_color
+        else:
+            redaction_source = Path(row["original_file_path"])
 
-    redact_image(redaction_source, fields, redacted_path, request.decisions)
+        redact_image(redaction_source, fields, redacted_path, request.decisions)
 
-    # Generate audit report
-    audit = generate_audit_report(
-        request.scan_id, row["timestamp"], row["filename"],
-        doc_type, row["document_type_confidence"],
-        context, row["pei_before"], pei_after, fields,
-        str(redacted_path),
-    )
+        # Generate audit report
+        audit = generate_audit_report(
+            request.scan_id, row["timestamp"], row["filename"],
+            doc_type, row["document_type_confidence"],
+            context, row["pei_before"], pei_after, fields,
+            str(redacted_path),
+        )
 
-    # Update DB
-    conn.execute(
-        "UPDATE scans SET pei_after = ?, redacted_file_path = ?, audit_report_json = ?, detected_fields_json = ? WHERE scan_id = ?",
-        (pei_after, str(redacted_path), json.dumps(audit.to_dict()),
-         json.dumps([f.to_dict() for f in fields]), request.scan_id),
-    )
-    conn.commit()
+        # Update DB
+        conn.execute(
+            "UPDATE scans SET pei_after = ?, redacted_file_path = ?, audit_report_json = ?, detected_fields_json = ? WHERE scan_id = ?",
+            (pei_after, str(redacted_path), json.dumps(audit.to_dict()),
+             json.dumps([f.to_dict() for f in fields]), request.scan_id),
+        )
+        conn.commit()
 
-    return RedactResponse(
-        pei_after=pei_after,
-        redacted_image_url=f"/files/redacted/{request.scan_id}/redacted.png",
-        audit_report=audit.to_dict(),
-    )
+        return RedactResponse(
+            pei_after=pei_after,
+            redacted_image_url=f"/files/redacted/{request.scan_id}/redacted.png",
+            audit_report=audit.to_dict(),
+        )
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────── GET /audit/{scan_id} ──────────────────────────
@@ -323,12 +336,15 @@ async def redact_document(request: RedactRequest):
 @router.get("/audit/{scan_id}")
 async def get_audit(scan_id: str):
     conn = get_connection()
-    row = conn.execute("SELECT audit_report_json FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "Scan not found")
-    if not row["audit_report_json"]:
-        raise HTTPException(404, "Audit report not yet generated. Run /redact first.")
-    return json.loads(row["audit_report_json"])
+    try:
+        row = conn.execute("SELECT audit_report_json FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Scan not found")
+        if not row["audit_report_json"]:
+            raise HTTPException(404, "Audit report not yet generated. Run /redact first.")
+        return json.loads(row["audit_report_json"])
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────── GET /scans ────────────────────────────────────
@@ -336,11 +352,14 @@ async def get_audit(scan_id: str):
 @router.get("/scans", response_model=list[ScanSummary])
 async def list_scans():
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT scan_id, timestamp, filename, document_type, declared_context, "
-        "pei_before, pei_after, needs_review_count FROM scans ORDER BY timestamp DESC"
-    ).fetchall()
-    return [ScanSummary(**dict(r)) for r in rows]
+    try:
+        rows = conn.execute(
+            "SELECT scan_id, timestamp, filename, document_type, declared_context, "
+            "pei_before, pei_after, needs_review_count FROM scans ORDER BY timestamp DESC"
+        ).fetchall()
+        return [ScanSummary(**dict(r)) for r in rows]
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────── POST /scan-text ───────────────────────────────
@@ -361,7 +380,7 @@ async def scan_text(request: ScanTextRequest):
 
     # Run field extraction as "unknown" doc type
     extractor = _get_extractor()
-    fields = extractor._extract_unknown(ocr_result)
+    fields = extractor._extract_unknown(ocr_result, ocr_result)
 
     necessity_results = {}
     for f in fields:
@@ -411,15 +430,18 @@ def _field_to_response(f: DetectedField) -> FieldResponse:
 def _save_scan(scan_id, timestamp, filename, doc_type, doc_conf, context,
                orig_path, proc_path, raw_text, fields, pei_before, review_count):
     conn = get_connection()
-    conn.execute(
-        """INSERT INTO scans (scan_id, timestamp, filename, document_type,
-           document_type_confidence, declared_context, original_file_path,
-           processable_image_path, raw_text, detected_fields_json,
-           pei_before, needs_review_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (scan_id, timestamp, filename, doc_type, doc_conf, context,
-         orig_path, proc_path, raw_text,
-         json.dumps([f.to_dict() for f in fields]),
-         pei_before, review_count),
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            """INSERT INTO scans (scan_id, timestamp, filename, document_type,
+               document_type_confidence, declared_context, original_file_path,
+               processable_image_path, raw_text, detected_fields_json,
+               pei_before, needs_review_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (scan_id, timestamp, filename, doc_type, doc_conf, context,
+             orig_path, proc_path, raw_text,
+             json.dumps([f.to_dict() for f in fields]),
+             pei_before, review_count),
+        )
+        conn.commit()
+    finally:
+        conn.close()

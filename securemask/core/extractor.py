@@ -30,27 +30,7 @@ from securemask.schemas import get_schema
 
 logger = logging.getLogger(__name__)
 
-# region agent log
-def _agent_dbg(location: str, message: str, data: dict, hypothesis_id: str, run_id: str = "pre-fix") -> None:
-    import json
-    import time
-    from pathlib import Path
-    try:
-        entry = {
-            "sessionId": "edb17e",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        log_path = Path(__file__).resolve().parents[2] / "debug-edb17e.log"
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-# endregion
+
 
 _fuzzy = FuzzyRegexExtractor()
 _ner   = NERExtractor()
@@ -172,14 +152,7 @@ def _detect_photo_region(image_path: str, document_type: str = "") -> BoundingBo
         img_h, img_w = img.shape[:2]
         if document_type == "aadhaar":
             layout = _aadhaar_photo_layout(img_w, img_h)
-            # region agent log
-            _agent_dbg(
-                "extractor.py:_detect_photo_region",
-                "aadhaar_layout_photo",
-                {"layout": {"x": layout.x, "y": layout.y, "w": layout.width, "h": layout.height}},
-                "H1",
-            )
-            # endregion
+
             return layout
         gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         cascade = cv2.CascadeClassifier(
@@ -202,22 +175,7 @@ def _detect_photo_region(image_path: str, document_type: str = "") -> BoundingBo
                 continue
             candidates.append((x, y, w, h, area_ratio))
 
-        # region agent log
-        _agent_dbg(
-            "extractor.py:_detect_photo_region",
-            "face_candidates",
-            {
-                "img_w": img_w,
-                "img_h": img_h,
-                "faces_raw": len(faces),
-                "candidates": [
-                    {"x": int(x), "y": int(y), "w": int(w), "h": int(h), "area_ratio": round(ar, 4)}
-                    for x, y, w, h, ar in candidates
-                ],
-            },
-            "H1",
-        )
-        # endregion
+
         if candidates:
             x, y, w, h, _ = max(candidates, key=lambda f: f[4])
             pad_x  = int(w * 0.18)
@@ -227,19 +185,7 @@ def _detect_photo_region(image_path: str, document_type: str = "") -> BoundingBo
             right  = int(min(img_w, x + w + pad_x))
             bottom = int(min(img_h, y + h + pad_y))
             box = BoundingBox(left, top, right - left, bottom - top)
-            # region agent log
-            _agent_dbg(
-                "extractor.py:_detect_photo_region",
-                "photo_box_selected",
-                {
-                    "face": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
-                    "padded": {"x": box.x, "y": box.y, "w": box.width, "h": box.height},
-                    "pct_w": round(box.width / img_w * 100, 2),
-                    "pct_h": round(box.height / img_h * 100, 2),
-                },
-                "H1",
-            )
-            # endregion
+
             return _expand_aadhaar_portrait_bbox(box, img_w, img_h)
     except Exception:
         pass
@@ -938,20 +884,7 @@ class FieldExtractor:
         mrz_data = None
 
         if document_type == 'aadhaar':
-            # region agent log
-            _agent_dbg(
-                "extractor.py:_extract_for_type",
-                "ocr_snippets",
-                {
-                    "full_len": len(ocr_result.full_text),
-                    "has_male": bool(re.search(r"(?i)\bmale\b", ocr_result.full_text)),
-                    "has_name_kw": bool(re.search(r"(?i)name|नाम", ocr_result.full_text)),
-                    "name_like": re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}", ocr_result.full_text)[:5],
-                    "ocr_preview": ocr_result.full_text[:350],
-                },
-                "H6",
-            )
-            # endregion
+
             qr_data = _qr.decode(image)
             if qr_data:
                 logger.info('Aadhaar QR decoded successfully')
@@ -973,21 +906,7 @@ class FieldExtractor:
             zone_ocr         = self._filter_ocr_by_zone(ocr_result, schema.zone)
             zone_ocr_cleaned = self._filter_ocr_by_zone(cleaned_ocr, schema.zone)
 
-            # region agent log
-            if schema.field_name in ("name", "gender", "photo"):
-                _agent_dbg(
-                    "extractor.py:_extract_for_type",
-                    "zone_filter",
-                    {
-                        "field": schema.field_name,
-                        "zone": schema.zone,
-                        "words_total": len(ocr_result.words),
-                        "words_zoned": len(zone_ocr.words),
-                        "zone_text_preview": zone_ocr.full_text[:200],
-                    },
-                    "H4" if schema.field_name == "name" else "H6",
-                )
-            # endregion
+
 
             # Try with zone filter first
             detected = self._extract_field(
@@ -1006,31 +925,7 @@ class FieldExtractor:
                 results.append(detected)
                 seen.add(schema.field_name)
 
-            # region agent log
-            if schema.field_name in ("name", "gender", "photo"):
-                _agent_dbg(
-                    "extractor.py:_extract_for_type",
-                    "field_result",
-                    {
-                        "field": schema.field_name,
-                        "found": detected is not None,
-                        "value": (detected.field_value[:80] if detected else None),
-                        "method": (detected.detection_method if detected else None),
-                        "confidence": (round(detected.confidence, 3) if detected else None),
-                        "bbox": (
-                            {
-                                "x": detected.bounding_box.x,
-                                "y": detected.bounding_box.y,
-                                "w": detected.bounding_box.width,
-                                "h": detected.bounding_box.height,
-                            }
-                            if detected
-                            else None
-                        ),
-                    },
-                    "H3" if schema.field_name == "gender" else ("H5" if schema.field_name == "name" else "H1"),
-                )
-            # endregion
+
 
         # ---- Broad-scan fallbacks (all supported ID types) ----
         if document_type in ('aadhaar', 'pan', 'passport', 'driving_license', 'voter_id'):
