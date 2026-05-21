@@ -30,6 +30,28 @@ from securemask.schemas import get_schema
 
 logger = logging.getLogger(__name__)
 
+# region agent log
+def _agent_dbg(location: str, message: str, data: dict, hypothesis_id: str, run_id: str = "pre-fix") -> None:
+    import json
+    import time
+    from pathlib import Path
+    try:
+        entry = {
+            "sessionId": "edb17e",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parents[2] / "debug-edb17e.log"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# endregion
+
 _fuzzy = FuzzyRegexExtractor()
 _ner   = NERExtractor()
 _mrz   = MRZParser()
@@ -42,11 +64,15 @@ _qr    = QRDecoder()
 # Aadhaar UID: 12 digits in groups of 4, optionally separated by spaces/hyphens
 _AADHAAR_RE = re.compile(r'\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4})\b')
 
-# DOB: many formats OCR'd from Indian IDs
+# DOB: many formats OCR'd from Indian IDs (incl. EasyOCR noise: 15 0+ 2006)
 _DOB_RE = re.compile(
-    r'\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})'   # DD/MM/YYYY or DD-MM-YY
-    r'|\b(\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})'     # YYYY/MM/DD
-    r'|\b(\d{2}[\/\-]\d{2}[\/\-]\d{4})\b',           # DD/MM/YYYY strict
+    r'\b(\d{1,2}[\s\/\-\.\+oO+]{1,4}\d{1,2}[\s\/\-\.\+oO+]{1,4}\d{4})\b'
+    r'|\b(\d{4}[\s\/\-\.]\d{1,2}[\s\/\-\.]\d{1,2})\b'
+    r'|\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\b'
+)
+_DOB_NEAR_ANCHOR_RE = re.compile(
+    r'(?i)(?:d0r|dob|0ob|जन्म|तारीख)[^\d]{0,15}'
+    r'(\d{1,2})[\s\/\-\.\+oO+]{1,4}(\d{1,2})[\s\/\-\.\+oO+]{1,4}(\d{4})'
 )
 
 
@@ -93,12 +119,36 @@ def _normalize_bbox_pct(box: BoundingBox, w: int, h: int) -> BoundingBox:
 # Visual region detectors
 # ------------------------------------------------------------------
 
-def _detect_photo_region(image_path: str) -> BoundingBox | None:
+def _aadhaar_photo_layout(img_w: int, img_h: int, face_box: BoundingBox | None = None) -> BoundingBox:
+    """Fixed left portrait slot on Aadhaar (below emblem row, above UID block)."""
+    left = int(img_w * 0.04)
+    width = int(img_w * 0.26)
+    height = int(img_h * 0.40)
+    top = int(img_h * 0.24)
+    if face_box and (face_box.x + face_box.width / 2) < img_w * 0.38:
+        face_cy = face_box.y + face_box.height / 2
+        top = int(max(img_h * 0.18, min(top, face_cy - height * 0.38)))
+        top = int(min(top, img_h * 0.52 - height))
+    return BoundingBox(left, top, width, min(height, img_h - top))
+
+
+def _detect_photo_region(image_path: str, document_type: str = "") -> BoundingBox | None:
     try:
         img = cv2.imread(str(image_path))
         if img is None:
             return None
         img_h, img_w = img.shape[:2]
+        if document_type == "aadhaar":
+            layout = _aadhaar_photo_layout(img_w, img_h)
+            # region agent log
+            _agent_dbg(
+                "extractor.py:_detect_photo_region",
+                "aadhaar_layout_photo",
+                {"layout": {"x": layout.x, "y": layout.y, "w": layout.width, "h": layout.height}},
+                "H1",
+            )
+            # endregion
+            return layout
         gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
@@ -120,6 +170,22 @@ def _detect_photo_region(image_path: str) -> BoundingBox | None:
                 continue
             candidates.append((x, y, w, h, area_ratio))
 
+        # region agent log
+        _agent_dbg(
+            "extractor.py:_detect_photo_region",
+            "face_candidates",
+            {
+                "img_w": img_w,
+                "img_h": img_h,
+                "faces_raw": len(faces),
+                "candidates": [
+                    {"x": int(x), "y": int(y), "w": int(w), "h": int(h), "area_ratio": round(ar, 4)}
+                    for x, y, w, h, ar in candidates
+                ],
+            },
+            "H1",
+        )
+        # endregion
         if candidates:
             x, y, w, h, _ = max(candidates, key=lambda f: f[4])
             pad_x  = int(w * 0.18)
@@ -128,10 +194,42 @@ def _detect_photo_region(image_path: str) -> BoundingBox | None:
             top    = int(max(0, y - pad_y))
             right  = int(min(img_w, x + w + pad_x))
             bottom = int(min(img_h, y + h + pad_y))
-            return BoundingBox(left, top, right - left, bottom - top)
+            box = BoundingBox(left, top, right - left, bottom - top)
+            # region agent log
+            _agent_dbg(
+                "extractor.py:_detect_photo_region",
+                "photo_box_selected",
+                {
+                    "face": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
+                    "padded": {"x": box.x, "y": box.y, "w": box.width, "h": box.height},
+                    "pct_w": round(box.width / img_w * 100, 2),
+                    "pct_h": round(box.height / img_h * 100, 2),
+                },
+                "H1",
+            )
+            # endregion
+            return _expand_aadhaar_portrait_bbox(box, img_w, img_h)
     except Exception:
         pass
     return None
+
+
+def _normalize_gender_value(raw: str) -> str:
+    """Map OCR-noisy gender tokens to canonical labels."""
+    r = raw.strip()
+    compact = re.sub(r"\W+", "", r).lower()
+    if compact in ("male", "m", "iue", "jale", "lale", "ale") or r in (
+        "पुठप", "पुरुष", "पुरूष", "पुरुय",
+    ):
+        return "Male"
+    if compact in ("female", "f", "transgender") or r in ("महिला",):
+        return "Female" if compact != "transgender" else "Transgender"
+    return r.title()
+
+
+def _expand_aadhaar_portrait_bbox(face_box: BoundingBox, img_w: int, img_h: int) -> BoundingBox:
+    """Expand a Haar face box to the full left-side Aadhaar portrait frame."""
+    return _aadhaar_photo_layout(img_w, img_h, face_box)
 
 
 def _detect_signature_region(image_path: str, doc_type: str,
@@ -210,6 +308,10 @@ def _aadhaar_number_broad_scan(
                     continue
                 raw_val = m.group().strip()
                 bbox = _find_bbox_in_words(raw_val, words)
+                from securemask.utils.bbox_utils import expand_digit_sequence_bbox
+                expanded = expand_digit_sequence_bbox(raw_val, words)
+                if expanded:
+                    bbox = expanded
                 logger.info("Aadhaar broad-scan found UID: %s****", uid[:4])
                 from securemask.models.detected_field import DetectedField
                 return DetectedField(
@@ -224,6 +326,18 @@ def _aadhaar_number_broad_scan(
     return None
 
 
+def _normalize_dob_value(raw: str) -> str:
+    """Normalize OCR-noisy DOB to DD/MM/YYYY."""
+    m = re.search(
+        r'(\d{1,2})[\s\/\-\.\+oO+]{1,4}(\d{1,2})[\s\/\-\.\+oO+]{1,4}(\d{4})',
+        raw,
+    )
+    if m:
+        d, mo, y = m.group(1), m.group(2), m.group(3)
+        return f"{int(d):02d}/{int(mo):02d}/{y}"
+    return raw.strip()
+
+
 def _dob_broad_scan(
     ocr_result: OCRResult,
     cleaned_result: OCRResult,
@@ -236,13 +350,30 @@ def _dob_broad_scan(
         (ocr_result.full_text, ocr_result.words),
         (cleaned_result.full_text, cleaned_result.words),
     ]:
-        for m in _DOB_RE.finditer(text):
-            val = next(g for g in m.groups() if g)
-            # Validate year is plausible
+        for m in _DOB_NEAR_ANCHOR_RE.finditer(text):
+            val = _normalize_dob_value(
+                f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
+            )
             years = re.findall(r'\d{4}', val)
             if years and not any(1900 <= int(y) <= current_year for y in years):
                 continue
-            # Skip dates that look like ID numbers (no separator variety)
+            bbox = _find_bbox_in_words(val, words) or _find_bbox_in_words(m.group(0), words)
+            logger.info("DOB anchor-scan found: %s", val)
+            return DetectedField(
+                field_name='dob',
+                field_value=val,
+                sensitivity_weight=6,
+                detection_method='regex_fuzzy',
+                confidence=0.84,
+                bounding_box=bbox,
+                always_redact=False,
+            )
+        for m in _DOB_RE.finditer(text):
+            val = next(g for g in m.groups() if g)
+            val = _normalize_dob_value(val)
+            years = re.findall(r'\d{4}', val)
+            if years and not any(1900 <= int(y) <= current_year for y in years):
+                continue
             if re.fullmatch(r'\d+', val):
                 continue
             bbox = _find_bbox_in_words(val, words)
@@ -256,6 +387,161 @@ def _dob_broad_scan(
                 bounding_box=bbox,
                 always_redact=False,
             )
+    return None
+
+
+def _gender_bbox_from_words(words: list[OCRWord], row_y: int, row_h: int) -> BoundingBox | None:
+    """Union OCR word boxes that fuzzy-match male/female on the DOB row."""
+    from rapidfuzz import fuzz
+
+    hits: list[OCRWord] = []
+    for w in words:
+        cy = w.bbox.y + w.bbox.height / 2
+        if abs(cy - (row_y + row_h / 2)) > row_h * 2.0:
+            continue
+        clean = re.sub(r"\W+", "", w.text).lower()
+        if not clean:
+            continue
+        if (
+            fuzz.partial_ratio("male", clean) >= 72
+            or fuzz.partial_ratio("female", clean) >= 72
+            or clean in ("male", "female", "jale", "lale", "iue", "ale", "purush", "puruy")
+            or w.text.strip() in ("पुठप", "पुरुष", "पुरुय", "महिला")
+        ):
+            hits.append(w)
+    if not hits:
+        return None
+    left = min(w.bbox.x for w in hits)
+    top = min(w.bbox.y for w in hits)
+    right = max(w.bbox.x + w.bbox.width for w in hits)
+    bottom = max(w.bbox.y + w.bbox.height for w in hits)
+    return BoundingBox(left, top, right - left, bottom - top)
+
+
+def _aadhaar_name_near_dob_fallback(
+    ocr_result: OCRResult,
+    cleaned_result: OCRResult,
+) -> DetectedField | None:
+    """Recover name from Latin OCR tokens immediately before the DOB anchor."""
+    from securemask.core.ner import _is_valid_name_candidate
+
+    dob_anchors = (
+        "d0r", "dob", "0ob", "जन्म", "तारीख", "date of birth", "year of birth", "birth",
+    )
+    name_re = re.compile(
+        r"([A-Za-z]{2,}(?:\s+[A-Za-z]{2,}){1,3})\s*(?=(?:GAT|DOB|D0R|0OB|जन्म|तारीख|/DO))",
+        re.IGNORECASE,
+    )
+
+    for ocr in (ocr_result, cleaned_result):
+        text = ocr.full_text
+        words = ocr.words
+        lower = text.lower()
+        m = name_re.search(text)
+        if m:
+            parts = [p for p in m.group(1).split() if len(p) >= 4]
+            val = " ".join(parts[-3:]) if parts else m.group(1).strip()
+            if _is_valid_name_candidate(val):
+                bbox = _find_bbox_in_words(val, words)
+                logger.info("Aadhaar name recovered via DOB-line pattern: %s", val)
+                return DetectedField(
+                    field_name="name",
+                    field_value=val,
+                    sensitivity_weight=5,
+                    detection_method="regex_fuzzy",
+                    confidence=0.82,
+                    bounding_box=bbox,
+                    always_redact=False,
+                )
+        for anchor in dob_anchors:
+            idx = lower.find(anchor)
+            if idx < 0:
+                continue
+            before = text[:idx].strip()
+            tokens = re.findall(r"[A-Za-z]{3,}", before[-120:])
+            if len(tokens) >= 2:
+                val = " ".join(tokens[-3:])
+            else:
+                continue
+            if not _is_valid_name_candidate(val):
+                continue
+            bbox = _find_bbox_in_words(val, words)
+            logger.info("Aadhaar name recovered near DOB anchor '%s': %s", anchor, val)
+            return DetectedField(
+                field_name="name",
+                field_value=val,
+                sensitivity_weight=5,
+                detection_method="regex_fuzzy",
+                confidence=0.78,
+                bounding_box=bbox,
+                always_redact=False,
+            )
+    return None
+
+
+def _aadhaar_gender_near_dob_fallback(
+    ocr_result: OCRResult,
+    cleaned_result: OCRResult,
+) -> DetectedField | None:
+    """Recover gender from OCR tokens on the DOB row when regex misses garbled text."""
+    from rapidfuzz import fuzz
+
+    dob_anchors = ("d0r", "dob", "जन्म", "तारीख", "birth")
+    gender_targets = (
+        ("male", "Male"),
+        ("female", "Female"),
+        ("iue", "Male"),
+        ("lale", "Male"),
+        ("jale", "Male"),
+        ("purush", "Male"),
+        ("पुरुष", "Male"),
+        ("पुठप", "Male"),
+        ("महिला", "Female"),
+        ("transgender", "Transgender"),
+    )
+
+    for ocr in (ocr_result, cleaned_result):
+        lower = ocr.full_text.lower()
+        anchor_idx = -1
+        for anchor in dob_anchors:
+            anchor_idx = lower.find(anchor)
+            if anchor_idx >= 0:
+                break
+        if anchor_idx < 0:
+            continue
+
+        dob_words = []
+        for w in ocr.words:
+            if anchor in w.text.lower() or "d0r" in w.text.lower() or "052006" in w.text:
+                dob_words.append(w)
+        if not dob_words:
+            dob_words = ocr.words
+
+        ref_y = dob_words[0].bbox.y if dob_words else 0
+        row_h = max((w.bbox.height for w in dob_words), default=30)
+        row_words = [
+            w for w in ocr.words
+            if abs((w.bbox.y + w.bbox.height / 2) - (ref_y + row_h / 2)) <= row_h * 1.8
+            and w.bbox.x > (dob_words[0].bbox.x if dob_words else 0)
+        ]
+
+        for w in row_words:
+            clean = re.sub(r"\W+", "", w.text).lower()
+            if len(clean) < 2:
+                continue
+            for target, label in gender_targets:
+                if fuzz.ratio(clean, target) >= 68 or target in clean:
+                    bbox = w.bbox
+                    logger.info("Aadhaar gender recovered from token '%s' → %s", w.text, label)
+                    return DetectedField(
+                        field_name="gender",
+                        field_value=_normalize_gender_value(label),
+                        sensitivity_weight=2,
+                        detection_method="regex_fuzzy",
+                        confidence=0.75,
+                        bounding_box=bbox,
+                        always_redact=False,
+                    )
     return None
 
 
@@ -330,6 +616,20 @@ class FieldExtractor:
         mrz_data = None
 
         if document_type == 'aadhaar':
+            # region agent log
+            _agent_dbg(
+                "extractor.py:_extract_for_type",
+                "ocr_snippets",
+                {
+                    "full_len": len(ocr_result.full_text),
+                    "has_male": bool(re.search(r"(?i)\bmale\b", ocr_result.full_text)),
+                    "has_name_kw": bool(re.search(r"(?i)name|नाम", ocr_result.full_text)),
+                    "name_like": re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}", ocr_result.full_text)[:5],
+                    "ocr_preview": ocr_result.full_text[:350],
+                },
+                "H6",
+            )
+            # endregion
             qr_data = _qr.decode(image)
             if qr_data:
                 logger.info('Aadhaar QR decoded successfully')
@@ -351,6 +651,22 @@ class FieldExtractor:
             zone_ocr         = self._filter_ocr_by_zone(ocr_result, schema.zone)
             zone_ocr_cleaned = self._filter_ocr_by_zone(cleaned_ocr, schema.zone)
 
+            # region agent log
+            if schema.field_name in ("name", "gender", "photo"):
+                _agent_dbg(
+                    "extractor.py:_extract_for_type",
+                    "zone_filter",
+                    {
+                        "field": schema.field_name,
+                        "zone": schema.zone,
+                        "words_total": len(ocr_result.words),
+                        "words_zoned": len(zone_ocr.words),
+                        "zone_text_preview": zone_ocr.full_text[:200],
+                    },
+                    "H4" if schema.field_name == "name" else "H6",
+                )
+            # endregion
+
             # Try with zone filter first
             detected = self._extract_field(
                 schema, zone_ocr, zone_ocr_cleaned,
@@ -368,6 +684,32 @@ class FieldExtractor:
                 results.append(detected)
                 seen.add(schema.field_name)
 
+            # region agent log
+            if schema.field_name in ("name", "gender", "photo"):
+                _agent_dbg(
+                    "extractor.py:_extract_for_type",
+                    "field_result",
+                    {
+                        "field": schema.field_name,
+                        "found": detected is not None,
+                        "value": (detected.field_value[:80] if detected else None),
+                        "method": (detected.detection_method if detected else None),
+                        "confidence": (round(detected.confidence, 3) if detected else None),
+                        "bbox": (
+                            {
+                                "x": detected.bounding_box.x,
+                                "y": detected.bounding_box.y,
+                                "w": detected.bounding_box.width,
+                                "h": detected.bounding_box.height,
+                            }
+                            if detected
+                            else None
+                        ),
+                    },
+                    "H3" if schema.field_name == "gender" else ("H5" if schema.field_name == "name" else "H1"),
+                )
+            # endregion
+
         # ---- Broad-scan fallbacks for Aadhaar ----
         if document_type == 'aadhaar':
             if 'aadhaar_number' not in seen and not qr_data:
@@ -384,15 +726,48 @@ class FieldExtractor:
                     seen.add('dob')
                     logger.info('DOB recovered via broad-scan')
 
+            if 'name' not in seen or (
+                (nf := next((r for r in results if r.field_name == 'name'), None))
+                and len(nf.field_value.split()) < 3
+            ):
+                found = _aadhaar_name_near_dob_fallback(ocr_result, cleaned_ocr)
+                if found:
+                    if 'name' in seen:
+                        results = [r for r in results if r.field_name != 'name']
+                    results.append(found)
+                    seen.add('name')
+                    logger.info('Name recovered via DOB-anchored fallback')
+
+            if 'gender' not in seen:
+                found = _aadhaar_gender_near_dob_fallback(ocr_result, cleaned_ocr)
+                if found:
+                    results.append(found)
+                    seen.add('gender')
+                    logger.info('Gender recovered via DOB-row fallback')
+
+        if document_type == 'aadhaar':
+            from securemask.utils.bbox_utils import expand_digit_sequence_bbox
+            for field in results:
+                if field.field_name == 'aadhaar_number':
+                    expanded = expand_digit_sequence_bbox(
+                        field.field_value, ocr_result.words
+                    )
+                    if expanded:
+                        field.bounding_box = expanded
+
         # Collision: remove father_name if identical to name (NER confusion)
         name_field = next((r for r in results if r.field_name == 'name'), None)
         if name_field:
             from rapidfuzz import fuzz
+            name_tokens = set(name_field.field_value.lower().split())
             results = [
                 r for r in results
                 if r.field_name not in ('father_name', 'father_husband_name', 'father_spouse_name')
-                   or fuzz.ratio(r.field_value.strip().lower(),
+                   or (
+                       fuzz.ratio(r.field_value.strip().lower(),
                                   name_field.field_value.strip().lower()) <= 90
+                       and not set(r.field_value.lower().split()).issubset(name_tokens)
+                   )
             ]
 
         # Normalise bounding boxes to percentages
@@ -496,7 +871,7 @@ class FieldExtractor:
 
             elif schema.field_name == 'photo':
                 if image_path:
-                    photo_box = _detect_photo_region(image_path)
+                    photo_box = _detect_photo_region(image_path, document_type)
                     if photo_box:
                         value       = 'PHOTO_REGION'
                         confidence  = 0.85
@@ -505,6 +880,26 @@ class FieldExtractor:
 
         if not value:
             return None
+
+        if schema.field_name == "gender":
+            value = _normalize_gender_value(value)
+            row_y, row_h = bbox.y, max(bbox.height, 28)
+            merged = _gender_bbox_from_words(ocr_result.words, row_y, row_h)
+            img_w = ocr_result.image_width or 1
+            img_h = ocr_result.image_height or 1
+            if merged and merged.width < img_w * 0.45 and merged.height < img_h * 0.2:
+                bbox = merged
+            elif value == "Male":
+                for alias in ("male", "jale", "पुरुष", "पुरुय", "पुठप"):
+                    extra = _find_bbox_in_words(alias, ocr_result.words)
+                    if extra.width > 1:
+                        bbox = BoundingBox(
+                            min(bbox.x, extra.x),
+                            min(bbox.y, extra.y),
+                            max(bbox.x + bbox.width, extra.x + extra.width) - min(bbox.x, extra.x),
+                            max(bbox.y + bbox.height, extra.y + extra.height) - min(bbox.y, extra.y),
+                        )
+                        break
 
         return DetectedField(
             field_name=schema.field_name,

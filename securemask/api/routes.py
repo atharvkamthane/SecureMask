@@ -245,7 +245,11 @@ async def upload_document(file: UploadFile = File(...),
         raw_text=ocr_result.full_text,
         recommendation_summary=summarize_recommendations(detected_fields),
         original_file_url=f"/files/uploads/{scan_id}/{file.filename}",
-        processable_image_url=f"/files/processed/{scan_id}/preprocessed.png",
+        processable_image_url=(
+            f"/files/processed/{scan_id}/color.jpg"
+            if (proc_dir / "color.jpg").exists()
+            else f"/files/processed/{scan_id}/preprocessed.png"
+        ),
     )
 
 

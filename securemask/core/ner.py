@@ -210,7 +210,34 @@ class NERExtractor:
                 return result
 
         # Keyword anchored fallback (use original text to preserve anchor positions)
-        return self._keyword_anchor(text, field_name, words, anchor_keywords)
+        result = self._keyword_anchor(text, field_name, words, anchor_keywords)
+        # region agent log
+        if field_name in ("name", "gender"):
+            import json
+            import time
+            from pathlib import Path
+            try:
+                entry = {
+                    "sessionId": "edb17e",
+                    "runId": "pre-fix",
+                    "hypothesisId": "H5",
+                    "location": "ner.py:extract",
+                    "message": "ner_fallback_anchor",
+                    "data": {
+                        "field": field_name,
+                        "hf_loaded": self._hf_pipe is not None,
+                        "value": result[0][:80] if result[0] else None,
+                        "conf": round(result[1], 3) if result[0] else 0,
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+                log_path = Path(__file__).resolve().parents[2] / "debug-edb17e.log"
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        # endregion
+        return result
 
     def _hf_extract(self, text, field_name, target_types, words, keywords):
         try:

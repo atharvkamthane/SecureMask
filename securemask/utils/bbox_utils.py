@@ -39,9 +39,12 @@ def find_bbox_in_words(value: str, words: list[OCRWord]) -> BoundingBox:
             sub_combined = "".join(sub_clean_words)
             
             score = fuzz.ratio(sub_combined, target_clean)
-            
-            # Prefer smaller windows on tie to avoid grabbing neighboring words
-            if score > best_score or (score == best_score and len(sub_words) < len(best_match_words)):
+
+            # Prefer longer windows on tie when value has multiple tokens (full UID/name)
+            if score > best_score:
+                best_score = score
+                best_match_words = sub_words
+            elif score == best_score and len(sub_words) > len(best_match_words):
                 best_score = score
                 best_match_words = sub_words
                 
@@ -68,3 +71,33 @@ def find_bbox_in_words(value: str, words: list[OCRWord]) -> BoundingBox:
         return best_single_word.bbox
         
     return BoundingBox(0, 0, 1, 1)
+
+
+def expand_digit_sequence_bbox(value: str, words: list[OCRWord]) -> BoundingBox | None:
+    """Union all 4-digit OCR tokens on the same row as a 12-digit UID value."""
+    groups = re.findall(r"\d{4}", re.sub(r"\D", " ", value))
+    if len(groups) < 2:
+        return None
+
+    seed = find_bbox_in_words(groups[0], words)
+    if seed.width <= 2:
+        return None
+
+    row_y = seed.y + seed.height / 2
+    row_h = max(seed.height, 20)
+    boxes: list[BoundingBox] = [seed]
+    for w in words:
+        if not re.fullmatch(r"\d{3,4}", re.sub(r"\D", "", w.text)):
+            continue
+        cy = w.bbox.y + w.bbox.height / 2
+        if abs(cy - row_y) <= row_h * 1.2:
+            boxes.append(w.bbox)
+
+    if len(boxes) < 2:
+        return None
+
+    left = min(b.x for b in boxes)
+    top = min(b.y for b in boxes)
+    right = max(b.x + b.width for b in boxes)
+    bottom = max(b.y + b.height for b in boxes)
+    return BoundingBox(left, top, right - left, bottom - top)

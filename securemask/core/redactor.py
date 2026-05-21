@@ -13,17 +13,55 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from securemask.models.detected_field import DetectedField
+from securemask.models.detected_field import BoundingBox, DetectedField
 
 logger = logging.getLogger(__name__)
+
+IDENTIFIER_FIELDS = {
+    "aadhaar_number", "pan_number", "passport_number", "dl_number", "epic_number",
+}
+
+# region agent log
+def _agent_dbg_redact(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    import json
+    import time
+    from pathlib import Path
+    try:
+        entry = {
+            "sessionId": "edb17e",
+            "runId": "post-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parents[2] / "debug-edb17e.log"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# endregion
 
 
 class Redactor:
     """Apply redaction or masking to document images."""
 
-    PADDING = 4
-    MIN_MASK_VISIBLE_PX = 28
-    MAX_MASK_VISIBLE_PX = 90
+    PADDING = 6
+    MIN_MASK_VISIBLE_PX = 18
+    MAX_MASK_VISIBLE_PX = 48
+
+    def _bbox_pixels(self, field: DetectedField, img_w: int, img_h: int) -> BoundingBox:
+        """Resolve bbox in image pixels; prefer percentage box when set."""
+        if field.bounding_box_pct and img_w > 0 and img_h > 0:
+            p = field.bounding_box_pct
+            return BoundingBox(
+                int(p.x / 100 * img_w),
+                int(p.y / 100 * img_h),
+                max(1, int(p.width / 100 * img_w)),
+                max(1, int(p.height / 100 * img_h)),
+            )
+        return field.bounding_box
 
     def _background_fill(self, img: Image.Image, box: tuple[int, int, int, int]) -> tuple[int, int, int]:
         """Estimate local document background so the redaction blends with the page."""
@@ -64,6 +102,7 @@ class Redactor:
         """Apply redaction/masking to a copy of the image."""
         img = image.copy()
         draw = ImageDraw.Draw(img)
+        img_w, img_h = img.size
 
         for field in fields:
             decision = decisions.get(field.field_name, "allow")
@@ -74,15 +113,16 @@ class Redactor:
             if decision == "allow" or field.bounding_box is None:
                 continue
 
-            bb = field.bounding_box
+            bb = self._bbox_pixels(field, img_w, img_h)
             if bb.width <= 2 and bb.height <= 2:
                 logger.debug("Skipping redaction for %s: placeholder bbox", field.field_name)
                 continue
 
-            x = max(0, int(bb.x) - self.PADDING)
-            y = max(0, int(bb.y) - self.PADDING)
-            x2 = min(img.width, int(bb.x) + int(bb.width) + self.PADDING)
-            y2 = min(img.height, int(bb.y) + int(bb.height) + self.PADDING)
+            pad = self.PADDING + (4 if field.field_name in IDENTIFIER_FIELDS else 0)
+            x = max(0, int(bb.x) - pad)
+            y = max(0, int(bb.y) - pad)
+            x2 = min(img.width, int(bb.x) + int(bb.width) + pad)
+            y2 = min(img.height, int(bb.y) + int(bb.height) + pad)
             if x2 <= x or y2 <= y:
                 continue
 
@@ -92,12 +132,26 @@ class Redactor:
                 draw.rectangle([x, y, x2, y2], fill=fill)
             elif decision == "mask":
                 box_width = max(1, x2 - x)
+                visible_ratio = 0.15 if field.field_name in IDENTIFIER_FIELDS else 0.28
                 visible_width = min(
                     self.MAX_MASK_VISIBLE_PX,
-                    max(self.MIN_MASK_VISIBLE_PX, int(box_width * 0.28)),
+                    max(self.MIN_MASK_VISIBLE_PX, int(box_width * visible_ratio)),
                     box_width,
                 )
                 draw.rectangle([x, y, max(x, x2 - visible_width), y2], fill=fill)
+
+            # region agent log
+            _agent_dbg_redact(
+                "redactor.py:redact",
+                "field_applied",
+                {
+                    "field": field.field_name,
+                    "decision": decision,
+                    "box": [x, y, x2 - x, y2 - y],
+                },
+                "H8",
+            )
+            # endregion
 
         return img
 

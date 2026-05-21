@@ -32,6 +32,28 @@ logger = logging.getLogger(__name__)
 
 SKIP_EASYOCR_PREWARM_ENV = "SECUREMASK_SKIP_OCR_PREWARM"
 
+# region agent log
+def _agent_dbg_ocr(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    import json
+    import time
+    from pathlib import Path
+    try:
+        entry = {
+            "sessionId": "edb17e",
+            "runId": "post-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parents[2] / "debug-edb17e.log"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# endregion
+
 # ------------------------------------------------------------------
 # Thresholds
 # ------------------------------------------------------------------
@@ -65,6 +87,56 @@ class OCRResult:
 # ------------------------------------------------------------------
 # PaddleOCR 3.x universal result extractor
 # ------------------------------------------------------------------
+
+def _box_from_points(poly) -> tuple[int, int, int, int]:
+    """Return x, y, width, height from polygon or [x1,y1,x2,y2] box."""
+    if not poly:
+        return 0, 0, 1, 1
+    flat = poly[0] if poly and isinstance(poly[0], (list, tuple)) and len(poly) == 1 else poly
+    if len(flat) >= 4 and not isinstance(flat[0], (list, tuple)):
+        x1, y1, x2, y2 = (float(flat[0]), float(flat[1]), float(flat[2]), float(flat[3]))
+        return int(min(x1, x2)), int(min(y1, y2)), int(abs(x2 - x1)), int(abs(y2 - y1))
+    xs = [int(p[0]) for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+    ys = [int(p[1]) for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+    if not xs:
+        return 0, 0, 1, 1
+    bx, by = int(min(xs)), int(min(ys))
+    return bx, by, int(max(xs) - bx), int(max(ys) - by)
+
+
+def _extract_paddle_word_items(res) -> list[tuple[str, float, list]]:
+    """Word-level tokens from PaddleOCR 3.5 ``text_word`` + ``text_word_boxes``."""
+    def _get(obj, key, default=None):
+        try:
+            return obj[key]
+        except (KeyError, TypeError, IndexError):
+            pass
+        try:
+            return getattr(obj, key, default)
+        except Exception:
+            pass
+        return default
+
+    line_words = _get(res, "text_word")
+    line_boxes = _get(res, "text_word_boxes")
+    if not line_words or not line_boxes:
+        return []
+
+    line_scores = _get(res, "rec_scores") or []
+    items: list[tuple[str, float, list]] = []
+    for line_idx, (words, boxes) in enumerate(zip(line_words, line_boxes)):
+        conf = float(line_scores[line_idx]) if line_idx < len(line_scores) else 0.75
+        if not isinstance(words, (list, tuple)):
+            continue
+        box_list = boxes if isinstance(boxes, (list, tuple)) else []
+        for word_idx, token in enumerate(words):
+            text = str(token).strip()
+            if not text:
+                continue
+            poly = list(box_list[word_idx]) if word_idx < len(box_list) else []
+            items.append((text, conf, poly))
+    return items
+
 
 def _extract_paddle_items(res) -> list[tuple[str, float, list]]:
     """
@@ -151,14 +223,10 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
     parts: list[str] = []
 
     for res in result:
-        for text, conf, poly in _extract_paddle_items(res):
-            if poly:
-                xs = [int(p[0]) for p in poly]
-                ys = [int(p[1]) for p in poly]
-                bx, by = int(min(xs)), int(min(ys))
-                bw, bh = int(max(xs) - bx), int(max(ys) - by)
-            else:
-                bx, by, bw, bh = 0, 0, 1, 1
+        word_items = _extract_paddle_word_items(res)
+        line_items = _extract_paddle_items(res) if not word_items else []
+        for text, conf, poly in (word_items or line_items):
+            bx, by, bw, bh = _box_from_points(poly)
             words.append(OCRWord(text=text, confidence=conf,
                                   bbox=BoundingBox(bx, by, bw, bh)))
             parts.append(text)
@@ -189,17 +257,30 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
 # PaddleOCR lazy cached readers
 # ------------------------------------------------------------------
 
+def _paddle_env_setup() -> None:
+    """Disable OneDNN/MKLDNN — required on Windows+Paddle 3.3+ to avoid PIR crash."""
+    os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+    os.environ["FLAGS_use_mkldnn"] = "0"
+    os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+
+
+def _create_paddle_reader(lang: str):
+    """PaddleOCR 3.5+ init (no show_log; enable_mkldnn=False avoids OneDNN crash)."""
+    _paddle_env_setup()
+    from paddleocr import PaddleOCR
+    return PaddleOCR(
+        lang=lang,
+        enable_mkldnn=False,
+        return_word_box=True,
+        use_doc_orientation_classify=True,
+        use_doc_unwarping=True,
+    )
+
+
 @lru_cache(maxsize=1)
 def _get_paddle_reader_en():
     try:
-        os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-        os.environ["FLAGS_use_mkldnn"] = "0"
-        os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
-        from paddleocr import PaddleOCR
-        try:
-            reader = PaddleOCR(lang="en", show_log=False, enable_mkldnn=False)
-        except TypeError:
-            reader = PaddleOCR(lang="en", show_log=False)
+        reader = _create_paddle_reader("en")
         logger.info("PaddleOCR (English) initialised")
         return reader
     except Exception as exc:
@@ -210,14 +291,7 @@ def _get_paddle_reader_en():
 @lru_cache(maxsize=1)
 def _get_paddle_reader_hi():
     try:
-        os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-        os.environ["FLAGS_use_mkldnn"] = "0"
-        os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
-        from paddleocr import PaddleOCR
-        try:
-            reader = PaddleOCR(lang="hi", show_log=False, enable_mkldnn=False)
-        except TypeError:
-            reader = PaddleOCR(lang="hi", show_log=False)
+        reader = _create_paddle_reader("hi")
         logger.info("PaddleOCR (Hindi) initialised")
         return reader
     except Exception as exc:
@@ -233,6 +307,14 @@ def _run_paddle(reader, image_path: str) -> OCRResult | None:
         return _parse_paddle_result(raw, image_path)
     except Exception as exc:
         logger.error("PaddleOCR predict() failed: %s", exc)
+        # region agent log
+        _agent_dbg_ocr(
+            "ocr.py:_run_paddle",
+            "paddle_predict_failed",
+            {"error": str(exc)[:200], "image": str(image_path)[-80:]},
+            "H7",
+        )
+        # endregion
         return None
 
 
@@ -422,26 +504,73 @@ class OCREngine:
 
         # ---- 1. PaddleOCR ----
         paddle_result = _paddle_ocr(color_path)
-        if (paddle_result
-                and paddle_result.avg_confidence >= PADDLE_CONFIDENCE_THRESHOLD
-                and len(paddle_result.words) >= MIN_WORDS_THRESHOLD):
-            logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
-                        len(paddle_result.words), paddle_result.avg_confidence)
-            return self._finalize(paddle_result)
+        paddle_ok = (
+            paddle_result is not None
+            and len(paddle_result.words) >= MIN_WORDS_THRESHOLD
+        )
+
+        # ---- 2. EasyOCR (word-level boxes; also fallback when Paddle fails) ----
+        easy_result = _easyocr_fallback(color_path)
+
+        if paddle_ok:
+            final = paddle_result
+            engine = "paddle"
+            if easy_result and len(easy_result.words) > len(paddle_result.words):
+                final = OCRResult(
+                    full_text=paddle_result.full_text or easy_result.full_text,
+                    words=easy_result.words,
+                    image_width=paddle_result.image_width or easy_result.image_width,
+                    image_height=paddle_result.image_height or easy_result.image_height,
+                )
+                engine = "paddle_text+easyocr_boxes"
+            logger.info(
+                "OCR engine: %s — %d words @ conf %.2f",
+                engine, len(final.words), final.avg_confidence,
+            )
+            # region agent log
+            _agent_dbg_ocr(
+                "ocr.py:extract",
+                "engine_selected",
+                {
+                    "engine": engine,
+                    "words": len(final.words),
+                    "conf": round(final.avg_confidence, 3),
+                    "preview": final.full_text[:200],
+                },
+                "H7",
+            )
+            # endregion
+            return self._finalize(final)
 
         low_conf  = paddle_result.avg_confidence if paddle_result else 0.0
         low_words = len(paddle_result.words)      if paddle_result else 0
-        logger.info("PaddleOCR below threshold (conf=%.2f, words=%d) — trying EasyOCR",
+        logger.info("PaddleOCR unavailable (conf=%.2f, words=%d) — using EasyOCR",
                     low_conf, low_words)
+        # region agent log
+        _agent_dbg_ocr(
+            "ocr.py:extract",
+            "paddle_skipped",
+            {"conf": round(low_conf, 3), "words": low_words},
+            "H7",
+        )
+        # endregion
 
-        # ---- 2. EasyOCR ----
-        easy_result = _easyocr_fallback(color_path)
         if easy_result and easy_result.words:
             logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
                         len(easy_result.words), easy_result.avg_confidence)
-            # If Paddle returned anything at all, merge it in
-            if paddle_result and paddle_result.words:
-                return self._finalize(self._merge(paddle_result, easy_result))
+            # region agent log
+            _agent_dbg_ocr(
+                "ocr.py:extract",
+                "engine_selected",
+                {
+                    "engine": "easyocr",
+                    "words": len(easy_result.words),
+                    "conf": round(easy_result.avg_confidence, 3),
+                    "preview": easy_result.full_text[:200],
+                },
+                "H7",
+            )
+            # endregion
             return self._finalize(easy_result)
 
         # Best-effort
