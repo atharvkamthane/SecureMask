@@ -12,28 +12,61 @@ SecureMask is an AI-powered Document Privacy Protection System that detects pers
 | 4 | Passport            | Passport number, name, DOB, place of birth, expiry, father/spouse, MRZ|
 | 5 | Voter ID (EPIC)     | EPIC number, name, father/husband name, DOB, gender, address          |
 
-## Pipeline Stages
+## Detailed Pipeline & Architecture (How It Works)
 
-1. **Document Ingestion** — Accept JPG, PNG, PDF uploads
-2. **Preprocessing** — Deskew → Grayscale → Denoise → CLAHE → Otsu binarization (OpenCV)
-3. **OCR Extraction** — **PaddleOCR** (primary) → **Google Cloud Vision API** (fallback 1) → **EasyOCR** (fallback 2); word-level bounding boxes
-4. **Document Classification** — **MobileNetV2 CNN** (primary, PyTorch, trained on synthetic data) → Keyword/pattern scoring (fallback)
-5. **PII Field Extraction** — Multi-engine:
-   - QR code decoding (pyzbar) — Aadhaar XML parsing with zlib decompression
-   - MRZ parsing (passporteye / regex fallback) — Passport MRZ Type 3
-   - Regex + fuzzy matching (rapidfuzz) — sliding window + keyword-anchored search
-   - NER (HuggingFace IndicNER / spaCy `en_core_web_sm` fallback) — names, addresses, dates
-   - Image detection (Haar cascade face detection, QR region, signature region)
-6. **Necessity Classification** — 5-context × 5-document-type matrix (required vs excess fields)
-7. **PEI Computation** — Privacy Exposure Index score 0–100 with sensitivity weighting
-8. **Explainability** — Method-aware plain-English explanations per flagged field
-9. **Redaction Engine** — Pixel-level black-box masking with partial-mask mode support
+The SecureMask processing pipeline acts as an automated compliance auditor for identity verification. It processes files strictly in isolated local memory stages, ensuring rigorous protection of PII data.
+
+### 1. Document Ingestion & Storage Isolation
+- When a document (JPG, PNG, PDF) is uploaded via the FastAPI `/upload` endpoint, it receives a unique UUID `scan_id`.
+- The raw image is saved to `storage/uploads/<scan_id>`, isolated from other processing queues to ensure no cross-contamination.
+
+### 2. Preprocessing (OpenCV)
+Before text is read, the image must be normalized to counter bad lighting, shadows, and camera angles:
+- **Deskewing**: Affine transformations straighten the image to make text lines horizontal.
+- **Color Correction**: Converts to Grayscale, then applies **CLAHE** (Contrast Limited Adaptive Histogram Equalization) to balance lighting across the document (fixing dark shadows on physical ID photos). 
+- **Binarization**: Otsu's thresholding transforms it into high-contrast black-and-white for the OCR engine.
+
+### 3. OCR Text Extraction (Multi-Engine Chain)
+Extracts raw text and word-level coordinate bounding boxes (`[x, y, width, height]`). To guarantee reliable results across multiple situations, a chained fallback strategy is utilized:
+- **Google Cloud Vision API (Primary)**: The state-of-the-art cloud model that achieves top-tier accuracy on damaged text, holograms, and microscopic fonts.
+- **PaddleOCR (Fallback 1)**: Highly optimized open-source, local DL model (PP-OCRv4) utilized if API/Billing credentials fail or network interrupts occur. Very strong Hindi/English multi-language support.
+- **EasyOCR (Fallback 2)**: Used to rescue severely noisy structural anomalies if the primary and secondary engines output average confidence scores below the `< 0.72` threshold. 
+
+### 4. Machine Learning Document Classification
+Once text is read, SecureMask determines *what* the document is:
+- **MobileNetV2 CNN (PyTorch)**: A custom fine-tuned convolutional neural network trained on over 1,200 synthetic Indian identity documents (Aadhaar, PAN, DL, Voter ID, Passport). It evaluates visual features to declare the physical document type.
+- **Keyword Fallback**: If visual confidence is low (due to poor image framing), it scans OCR text for structural tells (e.g., "Election Commission" or "Permanent Account Number").
+
+### 5. Multi-Engine PII Extraction
+This is the core logic. It maps OCR data against a heavily-defined schema per document type mapping specific coordinates to precise privacy risk zones.
+- **Regex + Fuzzy Matching**: Uses `rapidfuzz` combined with sliding window techniques. Example: Detecting "DOB" next to a date string, even if OCR misread it as "D0B" or "QOB".
+- **NER (Named Entity Recognition)**: Natural language processing utilizing `HuggingFace IndicNER` (and `spaCy` en_core_web_sm fallback) extracts disconnected nouns to determine arbitrary names and addresses that don’t automatically fit standard regex patterns.
+- **QR / XML Decryption**: Finds QR regions (`pyzbar`) on Aadhaar cards, zlib-decompresses the binary data, and extracts the raw unencrypted XML string securely to cross-verify ID details.
+- **Computer Vision Extraction**: Utilizes Haar Cascade classifiers to find physical Human Faces and Signature blobs which classify as high-risk biometric PII.
+
+### 6. Context-Aware Necessity Classification
+A compliance engine reads the user’s declared `context` parameter (`address_proof`, `kyc_onboarding`, `restricted_age_verification`) and compares it against a 5x5 Matrix to determine if every extracted field is definitively *required* or an *excess violation*.
+
+### 7. Privacy Exposure Index (PEI) Scoring
+Calculates a numerical risk severity score (0-100) using mathematical compliance metrics.
+- Highly critical violations (like an exposed Aadhaar UID when only birth-year is needed) result in heavy `x10` penalties.
+- Legally required fields are weighted lightly at `x2`.
+- PEI acts as a dynamic visual gauge to illustrate GDPR and DPDP compliance risk.
+
+### 8. Explainability Engine
+Generates plain-English, method-aware audit warnings. (e.g., *"Aadhaar UID was flagged due to regex structure. In Address Verification context, it is an excess field and should be masked to adhere to DPDP regulations."*)
+
+### 9. Redaction Engine
+Generates a new, anonymized file payload:
+- Excludes user-defined "allowed" bounding boxes, parsing exact coordinate overlaps.
+- Uses `Pillow` (PIL) to draw mathematically exact black-out pixel redactions over the original raw image.
+- Saves safely to `storage/redacted/<scan_id>/safe.png`, severing unredacted ties to the final client output.
 
 ## Tech Stack
 
 ### Backend
 - **Framework:** Python 3.10+, FastAPI, Uvicorn
-- **OCR:** PaddleOCR (primary), Google Cloud Vision API, EasyOCR
+- **OCR:** Google Cloud Vision API (primary), PaddleOCR (fallback 1), EasyOCR (fallback 2)
 - **ML/Classification:** PyTorch (MobileNetV2 fine-tuned), torchvision
 - **NLP/NER:** HuggingFace Transformers (ai4bharat/IndicNER), spaCy (`en_core_web_sm`)
 - **Image Processing:** OpenCV (preprocessing, face detection), Pillow (redaction), pyzbar (QR)
