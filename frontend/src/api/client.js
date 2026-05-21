@@ -3,7 +3,7 @@ import toast from 'react-hot-toast'
 
 const client = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '/api',
-  timeout: 60000,
+  timeout: 300000, // Increased to 5 minutes to accommodate large model loading times for PaddleOCR 3.x
 })
 
 client.interceptors.response.use(

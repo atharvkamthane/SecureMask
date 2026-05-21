@@ -1,8 +1,8 @@
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
-paddleocr>=2.7.0
-paddlepaddle>=2.5.2
+paddleocr>=2.9.1
+paddlepaddle>=2.6.0
 torch>=2.2.0
 torchvision>=0.17.0
 transformers>=4.38.0

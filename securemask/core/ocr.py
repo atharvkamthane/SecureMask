@@ -69,11 +69,15 @@ def _get_paddle_reader_en():
     try:
         os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
         os.environ["FLAGS_use_mkldnn"] = "0"
+        os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
         from paddleocr import PaddleOCR
         try:
-            reader = PaddleOCR(lang="en", show_log=False)
+            reader = PaddleOCR(lang="en", show_log=False, enable_mkldnn=False)
         except Exception:
-            reader = PaddleOCR(lang="en")
+            try:
+                reader = PaddleOCR(lang="en", enable_mkldnn=False)
+            except Exception:
+                reader = PaddleOCR(lang="en")
         logger.info("PaddleOCR (English) initialised")
         return reader
     except Exception as exc:
@@ -86,11 +90,15 @@ def _get_paddle_reader_hi():
     try:
         os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
         os.environ["FLAGS_use_mkldnn"] = "0"
+        os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
         from paddleocr import PaddleOCR
         try:
-            reader = PaddleOCR(lang="hi", show_log=False)
+            reader = PaddleOCR(lang="hi", show_log=False, enable_mkldnn=False)
         except Exception:
-            reader = PaddleOCR(lang="hi")
+            try:
+                reader = PaddleOCR(lang="hi", enable_mkldnn=False)
+            except Exception:
+                reader = PaddleOCR(lang="hi")
         logger.info("PaddleOCR (Hindi) initialised")
         return reader
     except Exception as exc:
