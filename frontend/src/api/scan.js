@@ -5,7 +5,6 @@ export async function uploadDocument(file, context) {
   form.append('file', file)
   form.append('context', context)
   const { data } = await client.post('/upload', form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
   })
   return data
 }
