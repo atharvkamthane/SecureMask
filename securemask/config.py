@@ -17,9 +17,6 @@ ML_WEIGHTS_DIR = ML_DIR / "weights"
 CLASSIFIER_CHECKPOINT = ML_WEIGHTS_DIR / "classifier.pth"
 SYNTHETIC_DATA_DIR = ML_DIR / "synthetic_data"
 
-# GCP key for Vision API fallback
-GCP_CREDENTIALS_PATH = BASE_DIR / "securemask-493217-2bd77a5a45c8.json"
-
 SUPPORTED_CONTEXTS = [
     "age_verification",
     "identity_verification",

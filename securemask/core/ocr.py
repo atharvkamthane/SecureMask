@@ -1,12 +1,14 @@
-"""OCR engine: Google Cloud Vision primary → PaddleOCR fallback 1 → EasyOCR fallback 2.
+"""OCR engine: PaddleOCR primary → EasyOCR fallback.
 
-Key improvements over v1:
-  - Google Vision client is cached (one-time init) — fixes the "never calls API" bug
-  - All engines receive the *preprocessed* image, not the raw upload
-  - Permanent disable only on billing/credential errors; transient errors retry
-  - Hindi PaddleOCR is only invoked when English confidence is below threshold
-  - EasyOCR uses the enhanced-contrast image, not raw
-  - save_preprocessed_variants() called once per scan to avoid repeated processing
+Architecture:
+  - PaddleOCR (English + Hindi merge) — primary, best accuracy on Indian IDs
+  - EasyOCR — fallback when PaddleOCR is unavailable
+
+Each engine receives the correct image variant:
+  - PaddleOCR: enhanced grayscale (avoids double binarization)
+  - EasyOCR: deskewed color image (its own contrast logic works best on color)
+
+Google Cloud Vision has been removed to keep the project fully offline/local.
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from securemask.config import GCP_CREDENTIALS_PATH, STORAGE_DIR
+from securemask.config import STORAGE_DIR
 from securemask.models.detected_field import BoundingBox
 
 logger = logging.getLogger(__name__)
@@ -32,24 +34,9 @@ logger = logging.getLogger(__name__)
 # Thresholds / tunables
 # ------------------------------------------------------------------
 
-PADDLE_CONFIDENCE_THRESHOLD = 0.55
-PADDLE_HINDI_CONFIDENCE_THRESHOLD = 0.50  # lower bar for supplementary Hindi pass
+PADDLE_CONFIDENCE_THRESHOLD = 0.40  # lowered — PaddleOCR on Indian IDs often sits 0.5–0.7
+PADDLE_HINDI_CONFIDENCE_THRESHOLD = 0.45
 MIN_WORDS_THRESHOLD = 3
-EASYOCR_FALLBACK_THRESHOLD = 0.45  # trigger EasyOCR if best result is below this
-
-# Permanent-disable error substrings (billing/auth — no point retrying)
-_PERMANENT_VISION_ERRORS = {
-    "BILLING_DISABLED",
-    "billing account",
-    "403",
-    "permission_denied",
-    "SERVICE_DISABLED",
-    "API_KEY_INVALID",
-}
-
-_google_vision_disabled = False          # True only on permanent errors
-_google_vision_transient_errors = 0      # count of non-permanent errors
-_VISION_TRANSIENT_LIMIT = 3             # give up after this many transient failures
 
 
 @dataclass
@@ -74,142 +61,7 @@ class OCRResult:
 
 
 # ------------------------------------------------------------------
-# Google Cloud Vision — cached client + smart error handling
-# ------------------------------------------------------------------
-
-def _gcp_credentials_configured() -> bool:
-    """Return True if GCP credentials are discoverable."""
-    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-        return Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]).exists()
-    if GCP_CREDENTIALS_PATH.exists():
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(GCP_CREDENTIALS_PATH)
-        logger.info("GCP credentials loaded from %s", GCP_CREDENTIALS_PATH)
-        return True
-    return False
-
-
-@lru_cache(maxsize=1)
-def _get_vision_client():
-    """Lazy-init and **cache** the Vision client.
-
-    The original code created a new client on every OCR call, which:
-      1. Added ~200–500 ms cold-start overhead per document
-      2. Silently failed if the first import raised an exception, then
-         permanently marked Vision as disabled even on retry
-
-    This function runs once per process lifetime.
-    """
-    try:
-        from google.cloud import vision as gv
-        client = gv.ImageAnnotatorClient()
-        logger.info("Google Cloud Vision client initialised and cached")
-        return client
-    except Exception as exc:
-        logger.warning("Could not initialise Vision client: %s", exc)
-        return None
-
-
-def _is_permanent_vision_error(message: str) -> bool:
-    msg_lower = message.lower()
-    return any(tag.lower() in msg_lower for tag in _PERMANENT_VISION_ERRORS)
-
-
-def _google_vision_ocr(image_path: str) -> OCRResult | None:
-    """Extract text via Google Cloud Vision API.
-
-    Uses the cached client. Only permanently disables on billing/auth errors;
-    transient network errors are counted and allowed up to _VISION_TRANSIENT_LIMIT.
-    Sends the (preprocessed color) image for best accuracy.
-    """
-    global _google_vision_disabled, _google_vision_transient_errors
-
-    if _google_vision_disabled:
-        return None
-    if _google_vision_transient_errors >= _VISION_TRANSIENT_LIMIT:
-        logger.warning("Vision skipped: too many transient errors (%d)", _google_vision_transient_errors)
-        return None
-    if not _gcp_credentials_configured():
-        logger.info("Google Vision credentials not found — skipping")
-        return None
-
-    client = _get_vision_client()
-    if client is None:
-        return None
-
-    try:
-        from google.cloud import vision as gv
-
-        with open(image_path, "rb") as fh:
-            content = fh.read()
-
-        image_obj = gv.Image(content=content)
-        # document_text_detection is better than text_detection for dense layouts
-        response = client.document_text_detection(image=image_obj)
-
-        if response.error.message:
-            msg = response.error.message
-            if _is_permanent_vision_error(msg):
-                _google_vision_disabled = True
-                logger.error("Vision permanently disabled: %s", msg)
-            else:
-                _google_vision_transient_errors += 1
-                logger.warning("Vision transient error (%d/%d): %s",
-                               _google_vision_transient_errors, _VISION_TRANSIENT_LIMIT, msg)
-            return None
-
-        # Reset transient counter on success
-        _google_vision_transient_errors = 0
-
-        img = cv2.imread(str(image_path))
-        if img is None:
-            img = np.array(Image.open(image_path).convert("RGB"))
-        h, w = img.shape[:2]
-
-        words: list[OCRWord] = []
-        parts: list[str] = []
-
-        for page in response.full_text_annotation.pages:
-            for block in page.blocks:
-                for paragraph in block.paragraphs:
-                    for word in paragraph.words:
-                        text = "".join(s.text for s in word.symbols)
-                        if not text.strip():
-                            continue
-                        conf = float(word.confidence) if word.confidence else 0.85
-                        verts = word.bounding_box.vertices
-                        xs = [v.x for v in verts]
-                        ys = [v.y for v in verts]
-                        bx, by = min(xs), min(ys)
-                        bw, bh = max(xs) - bx, max(ys) - by
-                        words.append(OCRWord(
-                            text=text, confidence=conf,
-                            bbox=BoundingBox(bx, by, bw, bh),
-                        ))
-                        parts.append(text)
-
-        if not words:
-            logger.warning("Vision returned zero words for %s", image_path)
-            return None
-
-        full_text = " ".join(parts)
-        logger.info("Google Vision: %d words, avg_conf=%.2f", len(words),
-                    mean(w.confidence for w in words))
-        return OCRResult(full_text=full_text, words=words, image_width=w, image_height=h)
-
-    except Exception as exc:
-        msg = str(exc)
-        if _is_permanent_vision_error(msg):
-            _google_vision_disabled = True
-            logger.error("Vision permanently disabled: %s", exc)
-        else:
-            _google_vision_transient_errors += 1
-            logger.error("Vision transient exception (%d/%d): %s",
-                         _google_vision_transient_errors, _VISION_TRANSIENT_LIMIT, exc)
-        return None
-
-
-# ------------------------------------------------------------------
-# PaddleOCR — lazy cached readers
+# PaddleOCR — primary engine, lazy cached readers
 # ------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
@@ -254,7 +106,7 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
     img = cv2.imread(str(image_path))
     if img is None:
         img = np.array(Image.open(image_path).convert("RGB"))
-    h, w = img.shape[:2]
+    img_h, img_w = img.shape[:2]
 
     words: list[OCRWord] = []
     parts: list[str] = []
@@ -310,8 +162,8 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
     return OCRResult(
         full_text=" ".join(parts),
         words=words,
-        image_width=w,
-        image_height=h,
+        image_width=int(img_w),
+        image_height=int(img_h),
     )
 
 
@@ -362,7 +214,7 @@ def _paddle_ocr(image_path: str, force_hindi: bool = False) -> OCRResult | None:
 
 
 # ------------------------------------------------------------------
-# EasyOCR — secondary fallback
+# EasyOCR — fallback engine
 # ------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
@@ -419,6 +271,7 @@ def _split_easyocr_phrases(words: list[OCRWord]) -> list[OCRWord]:
 
 
 def _easyocr_fallback(image_path: str) -> OCRResult | None:
+    """Run EasyOCR on the given image path. Prefers COLOR images for best results."""
     reader = _get_easyocr_reader()
     if reader is None:
         return None
@@ -426,7 +279,7 @@ def _easyocr_fallback(image_path: str) -> OCRResult | None:
         img = cv2.imread(str(image_path))
         if img is None:
             img = np.array(Image.open(image_path).convert("RGB"))
-        h, w = img.shape[:2]
+        img_h, img_w = img.shape[:2]
 
         results = reader.readtext(
             img, detail=1, paragraph=False,
@@ -455,7 +308,7 @@ def _easyocr_fallback(image_path: str) -> OCRResult | None:
         words = _split_easyocr_phrases(words)
 
         return OCRResult(full_text=" ".join(w.text for w in words), words=words,
-                         image_width=int(w), image_height=int(h))
+                         image_width=int(img_w), image_height=int(img_h))
     except Exception as exc:
         logger.error("EasyOCR failed: %s", exc)
         return None
@@ -483,12 +336,11 @@ def _write_temp_image(arr: np.ndarray, suffix: str = ".png") -> str:
 class OCREngine:
     """Multi-engine OCR with preprocessed routing.
 
-    Google Vision  →  PaddleOCR (en, +hi if needed)  →  EasyOCR
+    PaddleOCR (en + hi)  →  EasyOCR fallback
 
-    Each engine now receives the correct image variant:
-      - Vision: deskewed JPEG color image (best for cloud model)
-      - Paddle: sharpened grayscale (avoids double binarization)
-      - EasyOCR: CLAHE-enhanced BGR (its own contrast logic)
+    Each engine receives the correct image variant:
+      - PaddleOCR: enhanced grayscale (avoids double binarization)
+      - EasyOCR: deskewed color image (its own contrast logic works best on color)
     """
 
     def extract(
@@ -510,48 +362,41 @@ class OCREngine:
         raw_path = str(image_path)
 
         # Resolve which image path to hand each engine
-        vision_path = str(preprocessed_color_path) if preprocessed_color_path else raw_path
-        paddle_path = str(preprocessed_gray_path)  if preprocessed_gray_path  else raw_path
-        easyocr_path = str(preprocessed_gray_path) if preprocessed_gray_path  else raw_path
+        paddle_path = str(preprocessed_gray_path) if preprocessed_gray_path else raw_path
+        # EasyOCR works MUCH better on color images, not grayscale/binary
+        easyocr_path = str(preprocessed_color_path) if preprocessed_color_path else raw_path
 
         selected_result = None
 
-        # ---- 1. Google Cloud Vision (primary) ----
-        vision_result = _google_vision_ocr(vision_path)
-        if vision_result and len(vision_result.words) >= MIN_WORDS_THRESHOLD:
-            logger.info("OCR engine: Google Vision — %d words @ conf %.2f",
-                        len(vision_result.words), vision_result.avg_confidence)
-            selected_result = vision_result
+        # ---- 1. PaddleOCR (primary) ----
+        paddle_result = _paddle_ocr(paddle_path)
+        if (paddle_result
+                and paddle_result.avg_confidence >= PADDLE_CONFIDENCE_THRESHOLD
+                and len(paddle_result.words) >= MIN_WORDS_THRESHOLD):
+            logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
+                        len(paddle_result.words), paddle_result.avg_confidence)
+            selected_result = paddle_result
         else:
-            logger.info("Google Vision skipped/failed — trying PaddleOCR")
+            low_conf = paddle_result.avg_confidence if paddle_result else 0.0
+            low_words = len(paddle_result.words) if paddle_result else 0
+            logger.info("PaddleOCR below threshold (conf=%.2f, words=%d) — trying EasyOCR",
+                        low_conf, low_words)
 
-            # ---- 2. PaddleOCR (fallback 1) ----
-            paddle_result = _paddle_ocr(paddle_path)
-            if (paddle_result
-                    and paddle_result.avg_confidence >= PADDLE_CONFIDENCE_THRESHOLD
-                    and len(paddle_result.words) >= MIN_WORDS_THRESHOLD):
-                logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
-                            len(paddle_result.words), paddle_result.avg_confidence)
-                selected_result = paddle_result
+            # ---- 2. EasyOCR (fallback) ----
+            easy_result = _easyocr_fallback(easyocr_path)
+            if easy_result and easy_result.words:
+                logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
+                            len(easy_result.words), easy_result.avg_confidence)
+                selected_result = easy_result
+
+                # If PaddleOCR also returned something, merge non-overlapping words
+                if paddle_result and paddle_result.words:
+                    selected_result = self._merge_results(paddle_result, easy_result)
             else:
-                low_conf = paddle_result.avg_confidence if paddle_result else 0.0
-                low_words = len(paddle_result.words) if paddle_result else 0
-                logger.info("PaddleOCR below threshold (conf=%.2f, words=%d) — trying EasyOCR",
-                            low_conf, low_words)
-
-                # ---- 3. EasyOCR (fallback 2) ----
-                easy_result = _easyocr_fallback(easyocr_path)
-                if easy_result and easy_result.words:
-                    logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
-                                len(easy_result.words), easy_result.avg_confidence)
-                    selected_result = easy_result
-                else:
-                    # ---- Best-effort: return whatever we have ----
-                    for candidate in (vision_result, paddle_result, easy_result):
-                        if candidate and candidate.words:
-                            logger.warning("OCR: returning partial result from best-effort fallback")
-                            selected_result = candidate
-                            break
+                # Best-effort: return whatever we have
+                if paddle_result and paddle_result.words:
+                    logger.warning("OCR: returning partial PaddleOCR result as best-effort")
+                    selected_result = paddle_result
 
         if selected_result is None:
             logger.error("All OCR engines failed for %s", image_path)
@@ -562,7 +407,7 @@ class OCREngine:
             '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
             '५': '5', '६': '6', '७': '7', '८': '8', '९': '9'
         }
-        
+
         def normalize_text(text: str) -> str:
             if not text:
                 return text
@@ -573,3 +418,23 @@ class OCREngine:
             w.text = normalize_text(w.text)
 
         return selected_result
+
+    def _merge_results(self, primary: OCRResult, secondary: OCRResult) -> OCRResult:
+        """Merge two OCR results, preferring primary words and adding non-overlapping secondary words."""
+        merged_words = list(primary.words)
+        for sw in secondary.words:
+            overlap = any(
+                abs(sw.bbox.x - pw.bbox.x) < 25 and abs(sw.bbox.y - pw.bbox.y) < 25
+                for pw in primary.words
+            )
+            if not overlap:
+                merged_words.append(sw)
+        merged_words.sort(key=lambda word: (word.bbox.y, word.bbox.x))
+        logger.info("OCR merge: %d primary + %d secondary → %d total words",
+                    len(primary.words), len(secondary.words), len(merged_words))
+        return OCRResult(
+            full_text=" ".join(w.text for w in merged_words),
+            words=merged_words,
+            image_width=primary.image_width or secondary.image_width,
+            image_height=primary.image_height or secondary.image_height,
+        )

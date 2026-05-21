@@ -27,10 +27,9 @@ Before text is read, the image must be normalized to counter bad lighting, shado
 - **Binarization**: Otsu's thresholding transforms it into high-contrast black-and-white for the OCR engine.
 
 ### 3. OCR Text Extraction (Multi-Engine Chain)
-Extracts raw text and word-level coordinate bounding boxes (`[x, y, width, height]`). To guarantee reliable results across multiple situations, a chained fallback strategy is utilized:
-- **Google Cloud Vision API (Primary)**: The state-of-the-art cloud model that achieves top-tier accuracy on damaged text, holograms, and microscopic fonts.
-- **PaddleOCR (Fallback 1)**: Highly optimized open-source, local DL model (PP-OCRv4) utilized if API/Billing credentials fail or network interrupts occur. Very strong Hindi/English multi-language support.
-- **EasyOCR (Fallback 2)**: Used to rescue severely noisy structural anomalies if the primary and secondary engines output average confidence scores below the `< 0.72` threshold. 
+Extracts raw text and word-level coordinate bounding boxes (`[x, y, width, height]`). To guarantee reliable results across multiple situations, a fallback strategy is utilized:
+- **PaddleOCR (Primary)**: Highly optimized open-source, local DL model (PP-OCRv4) utilized for strong Hindi/English multi-language support.
+- **EasyOCR (Fallback)**: Used to rescue severely noisy structural anomalies if the primary engine outputs average confidence scores below the `< 0.72` threshold. 
 
 ### 4. Machine Learning Document Classification
 Once text is read, SecureMask determines *what* the document is:
@@ -66,7 +65,7 @@ Generates a new, anonymized file payload:
 
 ### Backend
 - **Framework:** Python 3.10+, FastAPI, Uvicorn
-- **OCR:** Google Cloud Vision API (primary), PaddleOCR (fallback 1), EasyOCR (fallback 2)
+- **OCR:** PaddleOCR (primary), EasyOCR (fallback)
 - **ML/Classification:** PyTorch (MobileNetV2 fine-tuned), torchvision
 - **NLP/NER:** HuggingFace Transformers (ai4bharat/IndicNER), spaCy (`en_core_web_sm`)
 - **Image Processing:** OpenCV (preprocessing, face detection), Pillow (redaction), pyzbar (QR)
@@ -89,8 +88,6 @@ Generates a new, anonymized file payload:
 
 - Python 3.10+
 - Node.js 18+
-- Google Cloud Vision API credentials (optional, for OCR fallback)
-  - Save service account JSON as `securemask-493217-2bd77a5a45c8.json` in root
 
 ### Backend Installation
 
@@ -213,7 +210,7 @@ SecureMask/
 │   ├── api/
 │   │   └── routes.py            # REST endpoints + Pydantic response models
 │   ├── core/
-│   │   ├── ocr.py               # PaddleOCR → Google Vision → EasyOCR chain
+│   │   ├── ocr.py               # PaddleOCR → EasyOCR chain
 │   │   ├── classifier.py        # MobileNetV2 CNN + keyword fallback
 │   │   ├── extractor.py         # Multi-engine field extraction coordinator
 │   │   ├── fuzzy_regex.py       # Regex + rapidfuzz sliding-window matcher

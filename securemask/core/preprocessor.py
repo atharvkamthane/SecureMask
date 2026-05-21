@@ -3,7 +3,7 @@
 Steps: load → upscale (if small) → deskew → denoise → CLAHE → sharpen → binarize
 Returns multiple image variants tuned for different OCR engines:
   - binary_for_paddle: high-contrast B&W for PaddleOCR / EasyOCR
-  - enhanced_color:    deskewed + CLAHE color image for Google Vision (works best on color)
+  - enhanced_color:    deskewed + CLAHE color image for EasyOCR (works best on color)
   - pil_color:         PIL version of enhanced_color for redaction downstream
 """
 from __future__ import annotations

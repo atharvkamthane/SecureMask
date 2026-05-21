@@ -17,4 +17,3 @@ faker>=22.6.0
 numpy>=1.26.4
 spacy>=3.7.0
 easyocr>=1.7.2
-google-cloud-vision>=3.7.0

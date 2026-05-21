@@ -54,7 +54,7 @@ def prepare_scan_images(
     pass the returned paths down to OCREngine.extract().
 
     Returns a dict with keys:
-      'color'         → deskewed JPEG for Google Cloud Vision
+      'color'         → deskewed JPEG for EasyOCR
       'enhanced_gray' → sharpened grayscale PNG for PaddleOCR
       'binary'        → adaptive-thresholded PNG for EasyOCR / archival
 
