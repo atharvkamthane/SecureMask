@@ -61,6 +61,51 @@ def _is_blacklisted_name(text: str) -> bool:
     return False
 
 
+def _is_valid_name_candidate(text: str) -> bool:
+    """Return True only if the text looks like a real human name.
+
+    Rejects:
+    - Strings with >25% non-alphabetic characters (OCR garbage like 'Ji5cPiYC')
+    - Any single word in the name containing a digit
+    - Single tokens shorter than 3 characters
+    - Strings with more than 5 words (too long to be a name)
+    """
+    text = text.strip()
+    if not text:
+        return False
+    words = text.split()
+    if len(words) > 5:
+        return False
+    total_chars = sum(len(w) for w in words)
+    if total_chars < 3:
+        return False
+    # Reject if any individual word token contains a digit (OCR corruption)
+    if any(any(c.isdigit() for c in w) for w in words):
+        return False
+    alpha_chars = sum(1 for c in text if c.isalpha())
+    if total_chars > 0 and (alpha_chars / total_chars) < 0.75:
+        return False
+    return True
+
+
+def _build_filtered_text(text: str, words: list[OCRWord]) -> str:
+    """Rebuild OCR text excluding words with very low confidence.
+
+    Low-confidence EasyOCR tokens (conf < 0.4) are typically garbled and
+    produce false NER hits. Replace them with a space so surrounding context
+    is preserved but the garbage token doesn't pollute entity extraction.
+    """
+    if not words:
+        return text
+    filtered_parts = []
+    for w in words:
+        if w.confidence >= 0.4:
+            filtered_parts.append(w.text)
+        else:
+            filtered_parts.append(" ")  # preserve spacing
+    return " ".join(filtered_parts)
+
+
 def _is_valid_address(text: str) -> bool:
     """Check if text is a valid address (not just a country name)."""
     words = re.findall(r"\w+", text.strip())
@@ -149,19 +194,22 @@ class NERExtractor:
         if not target_types:
             return None, 0.0, None
 
+        # Build a confidence-filtered text for NER (removes garbled OCR tokens)
+        filtered_text = _build_filtered_text(text, words)
+
         # Try HuggingFace NER
         if self._hf_pipe is not None:
-            result = self._hf_extract(text, field_name, target_types, words, anchor_keywords)
+            result = self._hf_extract(filtered_text, field_name, target_types, words, anchor_keywords)
             if result[0]:
                 return result
 
         # Spacy fallback
         if self._spacy is not None:
-            result = self._spacy_extract(text, field_name, target_types, words, anchor_keywords)
+            result = self._spacy_extract(filtered_text, field_name, target_types, words, anchor_keywords)
             if result[0]:
                 return result
 
-        # Keyword anchored fallback
+        # Keyword anchored fallback (use original text to preserve anchor positions)
         return self._keyword_anchor(text, field_name, words, anchor_keywords)
 
     def _hf_extract(self, text, field_name, target_types, words, keywords):
@@ -172,8 +220,11 @@ class NERExtractor:
                 ent_group = ent.get("entity_group", "")
                 if ent_group in target_types:
                     value = ent.get("word", "").strip()
-                    if field_name in ("name", "father_name", "father_husband_name", "father_spouse_name") and _is_blacklisted_name(value):
-                        continue
+                    if field_name in ("name", "father_name", "father_husband_name", "father_spouse_name"):
+                        if _is_blacklisted_name(value):
+                            continue
+                        if not _is_valid_name_candidate(value):
+                            continue
                     score = ent.get("score", 0.5)
                     proximity = _keyword_proximity(value, ent.get("start", 0), text, keywords)
                     candidates.append((value, score * 0.7 + proximity * 0.3, ent))
@@ -193,8 +244,11 @@ class NERExtractor:
             candidates = []
             for ent in doc.ents:
                 if ent.label_ in target_types:
-                    if field_name in ("name", "father_name", "father_husband_name", "father_spouse_name") and _is_blacklisted_name(ent.text):
-                        continue
+                    if field_name in ("name", "father_name", "father_husband_name", "father_spouse_name"):
+                        if _is_blacklisted_name(ent.text):
+                            continue
+                        if not _is_valid_name_candidate(ent.text):
+                            continue
                     if field_name == "address" and not _is_valid_address(ent.text):
                         continue
                     proximity = _keyword_proximity(ent.text, ent.start_char, text, keywords)

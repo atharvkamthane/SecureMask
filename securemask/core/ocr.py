@@ -274,8 +274,8 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
                     poly = polys[i]
                     xs = [int(p[0]) for p in poly]
                     ys = [int(p[1]) for p in poly]
-                    bx, by = min(xs), min(ys)
-                    bw, bh = max(xs) - bx, max(ys) - by
+                    bx, by = int(min(xs)), int(min(ys))
+                    bw, bh = int(max(xs) - bx), int(max(ys) - by)
                 else:
                     bx, by, bw, bh = 0, 0, 1, 1
                 words.append(OCRWord(text=text, confidence=conf,
@@ -295,8 +295,8 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
                         continue
                     xs = [int(p[0]) for p in points]
                     ys = [int(p[1]) for p in points]
-                    bx, by = min(xs), min(ys)
-                    bw, bh = max(xs) - bx, max(ys) - by
+                    bx, by = int(min(xs)), int(min(ys))
+                    bw, bh = int(max(xs) - bx), int(max(ys) - by)
                     words.append(OCRWord(text=text, confidence=float(conf),
                                          bbox=BoundingBox(bx, by, bw, bh)))
                     parts.append(text)
@@ -379,6 +379,45 @@ def _get_easyocr_reader():
         return None
 
 
+def _split_easyocr_phrases(words: list[OCRWord]) -> list[OCRWord]:
+    """Split multi-word EasyOCR phrase tokens into individual sub-word tokens.
+
+    EasyOCR often returns entire lines as a single token (e.g.
+    'जन्म तारीख DOB: 15 04 2006' as one OCRWord). This makes per-field
+    bounding boxes unreliable. We split on whitespace and interpolate
+    sub-word bboxes proportionally by character count across the parent box.
+    """
+    result: list[OCRWord] = []
+    for word in words:
+        sub_tokens = word.text.split()
+        if len(sub_tokens) <= 1:
+            result.append(word)
+            continue
+
+        # Interpolate bbox horizontally by character count
+        total_chars = max(sum(len(t) for t in sub_tokens), 1)
+        parent_x = word.bbox.x
+        parent_w = word.bbox.width
+        parent_y = word.bbox.y
+        parent_h = word.bbox.height
+
+        x_cursor = parent_x
+        for token in sub_tokens:
+            token_chars = max(len(token), 1)
+            token_w = int(parent_w * token_chars / total_chars)
+            result.append(OCRWord(
+                text=token,
+                confidence=word.confidence,
+                bbox=BoundingBox(
+                    int(x_cursor), int(parent_y),
+                    int(token_w), int(parent_h),
+                ),
+            ))
+            x_cursor += token_w
+
+    return result
+
+
 def _easyocr_fallback(image_path: str) -> OCRResult | None:
     reader = _get_easyocr_reader()
     if reader is None:
@@ -401,17 +440,22 @@ def _easyocr_fallback(image_path: str) -> OCRResult | None:
                 continue
             xs = [int(p[0]) for p in pts]
             ys = [int(p[1]) for p in pts]
-            bx, by = min(xs), min(ys)
+            bx, by = int(min(xs)), int(min(ys))
+            bw, bh = int(max(xs) - bx), int(max(ys) - by)
             words.append(OCRWord(
                 text=text, confidence=float(conf),
-                bbox=BoundingBox(bx, by, max(xs) - bx, max(ys) - by),
+                bbox=BoundingBox(bx, by, bw, bh),
             ))
             parts.append(text)
 
         if not words:
             return None
-        return OCRResult(full_text=" ".join(parts), words=words,
-                         image_width=w, image_height=h)
+
+        # Split merged phrase tokens into individual sub-words with interpolated bboxes
+        words = _split_easyocr_phrases(words)
+
+        return OCRResult(full_text=" ".join(w.text for w in words), words=words,
+                         image_width=int(w), image_height=int(h))
     except Exception as exc:
         logger.error("EasyOCR failed: %s", exc)
         return None

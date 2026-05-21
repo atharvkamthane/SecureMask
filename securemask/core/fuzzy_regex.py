@@ -7,11 +7,25 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date as _date
 
 from rapidfuzz import fuzz
 
 from securemask.core.ocr import OCRWord
 from securemask.models.detected_field import BoundingBox
+
+
+def _validate_date_year(value: str) -> bool:
+    """Return True if the value contains no 4-digit year, or has one in a plausible range.
+
+    Rejects dates like 99/99/9999 where the year is clearly an OCR artifact.
+    """
+    four_digit_nums = re.findall(r"\b(\d{4})\b", value)
+    if not four_digit_nums:
+        return True  # no 4-digit number to validate, pass through
+    current_year = _date.today().year
+    # Accept if at least one looks like a plausible year
+    return any(1900 <= int(y) <= current_year for y in four_digit_nums)
 
 
 @dataclass
@@ -111,8 +125,12 @@ class FuzzyRegexExtractor:
                 if prox_score > best_prox_score:
                     best_prox_score = prox_score
                     best_match_val = val
-                    
+
             if best_match_val and (not anchor_keywords or best_prox_score > 0.15):
+                # Reject dates with implausible years (OCR artifacts / boilerplate)
+                if not _validate_date_year(best_match_val):
+                    best_match_val = None
+            if best_match_val:
                 bbox = self._find_bbox(best_match_val, words)
                 confidence = 0.95 if not anchor_keywords else min(0.70 + best_prox_score * 0.28, 0.98)
                 return best_match_val, confidence, bbox

@@ -36,6 +36,8 @@ _KEYWORD_SETS = {
             "aadhaar", "uid", "uidai", "unique identification authority",
             "government of india", "enrolment", "enrollment",
             "आधार", "भारत सरकार", "नाम", "पता", "जन्म",
+            "unique identity", "resident", "mera aadhaar", "my aadhaar",
+            "माझे आधार", "मेरा आधार",
         ],
         "patterns": [r"\d{4}\s?\d{4}\s?\d{4}"],
     },
@@ -43,6 +45,7 @@ _KEYWORD_SETS = {
         "keywords": [
             "permanent account number", "pan", "income tax",
             "department", "impot", "govt of india",
+            "income tax department", "father's name", "father name",
         ],
         "patterns": [r"[A-Z]{5}[0-9]{4}[A-Z]"],
     },
@@ -50,6 +53,7 @@ _KEYWORD_SETS = {
         "keywords": [
             "passport", "republic of india", "nationality", "surname",
             "given name", "place of birth", "date of expiry",
+            "country code", "ind", "machine readable",
         ],
         "patterns": [r"[A-PR-WY][1-9]\d{7}", r"P<IND"],
     },
@@ -57,6 +61,8 @@ _KEYWORD_SETS = {
         "keywords": [
             "driving licence", "driving license", "transport",
             "licence no", "dl no", "blood group", "vehicle class",
+            "motor vehicle act", "rto", "regional transport",
+            "validity", "cov", "non transport",
         ],
         "patterns": [r"[A-Z]{2}\d{2}[A-Z]{0,2}\d{4,7}"],
     },
@@ -64,6 +70,8 @@ _KEYWORD_SETS = {
         "keywords": [
             "election commission", "elector", "voter id", "epic",
             "photo identity card", "assembly constituency",
+            "electoral roll", "polling station", "part no",
+            "chief electoral officer", "epic no",
         ],
         "patterns": [r"[A-Z]{3}\d{7}"],
     },
@@ -92,7 +100,7 @@ def _keyword_classify(text: str) -> ClassificationResult:
     best_type = max(scores, key=scores.get)
     best_conf = scores[best_type]
 
-    if best_conf < 0.15:
+    if best_conf < 0.10:
         return ClassificationResult("unknown", best_conf, scores)
 
     return ClassificationResult(best_type, best_conf, scores)
@@ -176,15 +184,25 @@ class DocumentClassifier:
             return ClassificationResult("unknown", 0.0, {})
 
     def classify_with_text_fallback(self, image: Image.Image, ocr_text: str) -> ClassificationResult:
-        """Classify using CNN first; if result is 'unknown', try keyword fallback on OCR text."""
+        """Classify using CNN first; if result is 'unknown', always also try keyword fallback.
+
+        The keyword classifier is now always run when CNN confidence is below 0.65,
+        even if the CNN didn't return 'unknown', to catch borderline misclassifications.
+        """
         cnn_result = self.classify(image)
-        if cnn_result.document_type != "unknown" and cnn_result.confidence >= 0.55:
-            return cnn_result
 
-        kw_result = _keyword_classify(ocr_text)
-        if cnn_result.document_type == "unknown" and kw_result.document_type != "unknown":
-            return kw_result
-        if kw_result.confidence > cnn_result.confidence:
-            return kw_result
+        # Always run keyword if CNN is uncertain or unknown
+        if cnn_result.document_type == "unknown" or cnn_result.confidence < 0.65:
+            kw_result = _keyword_classify(ocr_text)
+            # Prefer keyword result if it's more confident or CNN was unknown
+            if kw_result.document_type != "unknown":
+                if cnn_result.document_type == "unknown":
+                    logger.info("Classifier: CNN unknown → keyword fallback → %s (%.2f)",
+                                kw_result.document_type, kw_result.confidence)
+                    return kw_result
+                if kw_result.confidence > cnn_result.confidence:
+                    logger.info("Classifier: keyword overrides CNN (%s > %s)",
+                                kw_result.document_type, cnn_result.document_type)
+                    return kw_result
 
-        return cnn_result if cnn_result.confidence > 0 else kw_result
+        return cnn_result

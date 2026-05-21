@@ -75,14 +75,77 @@ def _detect_photo_region(image_path: str) -> BoundingBox | None:
             x, y, w, h, _ = max(candidates, key=lambda f: f[4])
             pad_x = int(w * 0.18)
             pad_y = int(h * 0.22)
-            left = max(0, x - pad_x)
-            top = max(0, y - pad_y)
-            right = min(img_w, x + w + pad_x)
-            bottom = min(img_h, y + h + pad_y)
+            left = int(max(0, x - pad_x))
+            top = int(max(0, y - pad_y))
+            right = int(min(img_w, x + w + pad_x))
+            bottom = int(min(img_h, y + h + pad_y))
             return BoundingBox(left, top, right - left, bottom - top)
     except Exception:
         pass
     return None
+
+
+def _detect_signature_region(image_path: str, doc_type: str,
+                              img_w: int, img_h: int) -> BoundingBox:
+    """Detect signature region using contour analysis in the bottom portion of the image."""
+    try:
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise ValueError("Could not read image")
+
+        # Restrict search to bottom 35% of image
+        roi_y_start = int(img_h * 0.65)
+        roi = img[roi_y_start:, :]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        # Invert and threshold to find dark ink on light background
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Morphological dilation to connect nearby strokes
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+        dilated = cv2.dilate(thresh, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Look for a compact horizontal blob that could be a signature
+        best_box = None
+        best_score = 0.0
+        roi_h, roi_w = roi.shape[:2]
+
+        for cnt in contours:
+            cx, cy, cw, ch = cv2.boundingRect(cnt)
+            # Signature heuristics: wide, not too tall, not full width
+            aspect = cw / max(ch, 1)
+            area_frac = (cw * ch) / max(roi_w * roi_h, 1)
+            if cw < roi_w * 0.05 or cw > roi_w * 0.7:
+                continue
+            if ch > img_h * 0.20:
+                continue
+            if not 1.5 <= aspect <= 12:
+                continue
+            score = area_frac * aspect
+            if score > best_score:
+                best_score = score
+                best_box = (cx, roi_y_start + cy, cw, ch)
+
+        if best_box:
+            cx, cy, cw, ch = best_box
+            pad = 5
+            return BoundingBox(
+                int(max(0, cx - pad)), int(max(0, cy - pad)),
+                int(min(img_w, cw + pad * 2)), int(min(img_h, ch + pad * 2)),
+            )
+
+    except Exception as exc:
+        logger.debug("Signature contour detection failed: %s", exc)
+
+    # Per-document-type fallback positions
+    fallbacks = {
+        "pan": BoundingBox(int(img_w * 0.05), int(img_h * 0.72), int(img_w * 0.45), int(img_h * 0.15)),
+        "driving_license": BoundingBox(int(img_w * 0.50), int(img_h * 0.70), int(img_w * 0.40), int(img_h * 0.15)),
+    }
+    return fallbacks.get(doc_type,
+                         BoundingBox(int(img_w * 0.05), int(img_h * 0.75), int(img_w * 0.4), int(img_h * 0.18)))
 
 
 class FieldExtractor:
@@ -92,7 +155,30 @@ class FieldExtractor:
                 document_type: str, image_path: str | None = None) -> list[DetectedField]:
         schema_fields = get_schema(document_type)
         if not schema_fields:
-            return self._extract_unknown(ocr_result)
+            # Try all known schemas and return whichever yields the most confident fields
+            best_results = self._extract_unknown(ocr_result)
+            best_score = sum(f.confidence for f in best_results)
+
+            from securemask.schemas import SUPPORTED_TYPES
+            for try_type in SUPPORTED_TYPES:
+                try_results = self._extract_for_type(ocr_result, image, try_type, image_path)
+                high_conf = [f for f in try_results if f.confidence > 0.7]
+                score = len(high_conf) * 1.0 + sum(f.confidence for f in high_conf)
+                if score > best_score and len(try_results) > 0:
+                    best_score = score
+                    best_results = try_results
+                    logger.info("Unknown doc: schema trial '%s' yielded %d fields (score=%.2f)",
+                                try_type, len(try_results), score)
+
+            return best_results
+
+        return self._extract_for_type(ocr_result, image, document_type, image_path)
+
+    def _extract_for_type(self, ocr_result: OCRResult, image: Image.Image,
+                          document_type: str, image_path: str | None = None) -> list[DetectedField]:
+        schema_fields = get_schema(document_type)
+        if not schema_fields:
+            return []
 
         # Pre-compute special decoders
         qr_data = None
@@ -120,14 +206,14 @@ class FieldExtractor:
 
             detected = self._extract_field(
                 schema, zone_ocr, image, image_path,
-                qr_data, mrz_data,
+                qr_data, mrz_data, document_type,
             )
-            
+
             # Fallback if no value detected and zone was constrained
             if not detected and schema.zone not in ("anywhere", None):
                 detected = self._extract_field(
                     schema, ocr_result, image, image_path,
-                    qr_data, mrz_data,
+                    qr_data, mrz_data, document_type,
                 )
 
             if detected:
@@ -157,7 +243,7 @@ class FieldExtractor:
         return results
 
     def _extract_field(self, schema, ocr_result, image, image_path,
-                       qr_data=None, mrz_data=None) -> DetectedField | None:
+                       qr_data=None, mrz_data=None, document_type="unknown") -> DetectedField | None:
         value = None
         confidence = 0.0
         method_used = "unknown"
@@ -221,12 +307,15 @@ class FieldExtractor:
                     method_used = "image"
                     bbox = qr_boxes[0]
             elif schema.field_name == "signature":
-                # Signature is typically in bottom-right
                 h, w = ocr_result.image_height, ocr_result.image_width
+                if image_path:
+                    sig_box = _detect_signature_region(image_path, document_type, w, h)
+                else:
+                    sig_box = BoundingBox(int(w * 0.05), int(h * 0.75), int(w * 0.4), int(h * 0.18))
                 value = "SIGNATURE_REGION"
-                confidence = 0.60
+                confidence = 0.65
                 method_used = "image"
-                bbox = BoundingBox(int(w * 0.05), int(h * 0.75), int(w * 0.4), int(h * 0.2))
+                bbox = sig_box
             elif schema.field_name == "photo":
                 if image_path:
                     photo_box = _detect_photo_region(image_path)
@@ -295,7 +384,7 @@ class FieldExtractor:
             # Calculate vertical center of the word bounding box
             y_center = w.bbox.y + w.bbox.height / 2
             y_ratio = y_center / h
-            
+
             if zone == "top" and y_ratio < 0.45:
                 filtered_words.append(w)
             elif zone == "middle" and 0.20 <= y_ratio < 0.80:
@@ -305,7 +394,7 @@ class FieldExtractor:
 
         filtered_words.sort(key=lambda word: (word.bbox.y, word.bbox.x))
         filtered_text = " ".join(w.text for w in filtered_words)
-        
+
         return OCRResult(
             full_text=filtered_text,
             words=filtered_words,

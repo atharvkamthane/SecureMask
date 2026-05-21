@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from securemask.schemas.base import FieldSchema
 
+SUPPORTED_TYPES = ["aadhaar", "pan", "passport", "driving_license", "voter_id"]
+
 
 def get_schema(document_type: str) -> list[FieldSchema]:
     """Return the field schema list for a given document type."""

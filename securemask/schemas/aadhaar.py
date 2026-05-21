@@ -41,7 +41,7 @@ fields = [
         fuzzy_threshold=75,
         anchor_keywords=["dob", "date of birth", "जन्म तिथि", "जन्म तारीख",
                          "year of birth", "yob", "birth"],
-        zone="anywhere",
+        zone="top",
         always_redact=False,
     ),
     FieldSchema(
