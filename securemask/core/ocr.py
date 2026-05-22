@@ -311,17 +311,20 @@ def _run_paddle(reader, image_path: str) -> OCRResult | None:
 
 
 def _paddle_ocr(image_path: str, force_hindi: bool = False) -> OCRResult | None:
-    """Run English PaddleOCR; Hindi only when English confidence is low.
+    """Run English AND Hindi PaddleOCR and merge results.
+
+    Indian identity documents (Aadhaar, PAN, etc.) always contain both
+    English and Devanagari text. We always run both language models and
+    merge non-overlapping words from the Hindi result into the English one.
 
     IMPORTANT: image_path must point to a COLOR (BGR/RGB) image.
     PaddleOCR 3.x's UVDoc document-unwarping and orientation-detection
     sub-models require color input — grayscale produces silent empty output.
     """
     result_en = _run_paddle(_get_paddle_reader_en(), image_path)
-    en_conf   = result_en.avg_confidence if result_en else 0.0
 
-    run_hindi = force_hindi or en_conf < PADDLE_HINDI_CONFIDENCE_THRESHOLD
-    result_hi = _run_paddle(_get_paddle_reader_hi(), image_path) if run_hindi else None
+    # Always run Hindi OCR for Indian documents — they contain Devanagari
+    result_hi = _run_paddle(_get_paddle_reader_hi(), image_path)
 
     if result_en and result_hi:
         merged = list(result_en.words)
@@ -377,7 +380,7 @@ def _prewarm_easyocr() -> None:
 
 
 def _prewarm_paddle() -> None:
-    """Pre-load English PaddleOCR at startup (logs success or WARNING)."""
+    """Pre-load English and Hindi PaddleOCR at startup (logs success or WARNING)."""
     import threading
 
     def _warm():
@@ -390,6 +393,16 @@ def _prewarm_paddle() -> None:
                 )
         except Exception as exc:
             logger.warning("PaddleOCR (English) pre-warm failed: %s", exc)
+
+        try:
+            reader_hi = _get_paddle_reader_hi()
+            if reader_hi is None:
+                logger.warning(
+                    "PaddleOCR (Hindi) pre-warm failed: reader is None "
+                    "(check earlier WARNING for exception)"
+                )
+        except Exception as exc:
+            logger.warning("PaddleOCR (Hindi) pre-warm failed: %s", exc)
 
     threading.Thread(target=_warm, daemon=True, name="paddle-prewarm").start()
 

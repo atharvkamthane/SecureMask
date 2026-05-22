@@ -8,6 +8,7 @@ NECESSITY_MATRIX = {
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
         "name": {"all": True},
+        "name_hi": {"all": True},
         "dob": {
             "age_verification": True, "identity_verification": True,
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
@@ -18,6 +19,8 @@ NECESSITY_MATRIX = {
             "address_proof": True, "kyc_onboarding": True, "general_upload": False,
         },
         "phone": {"all": False},
+        "photo": {"all": False},
+        "signature": {"all": False},
         "qr_code": {"all": False},
     },
     "pan": {
@@ -26,11 +29,13 @@ NECESSITY_MATRIX = {
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
         "name": {"all": True},
+        "name_hi": {"all": True},
         "father_name": {"all": False},
         "dob": {
             "age_verification": True, "identity_verification": True,
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
+        "photo": {"all": False},
         "signature": {"all": False},
     },
     "passport": {
@@ -39,6 +44,7 @@ NECESSITY_MATRIX = {
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
         "name": {"all": True},
+        "name_hi": {"all": True},
         "dob": {
             "age_verification": True, "identity_verification": True,
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
@@ -49,6 +55,7 @@ NECESSITY_MATRIX = {
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
         "father_spouse_name": {"all": False},
+        "photo": {"all": False},
         "mrz_lines": {"all": False},
     },
     "driving_license": {
@@ -57,6 +64,7 @@ NECESSITY_MATRIX = {
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
         "name": {"all": True},
+        "name_hi": {"all": True},
         "dob": {
             "age_verification": True, "identity_verification": True,
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
@@ -66,6 +74,7 @@ NECESSITY_MATRIX = {
             "address_proof": True, "kyc_onboarding": True, "general_upload": False,
         },
         "blood_group": {"all": False},
+        "photo": {"all": False},
     },
     "voter_id": {
         "epic_number": {
@@ -73,6 +82,7 @@ NECESSITY_MATRIX = {
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
         "name": {"all": True},
+        "name_hi": {"all": True},
         "father_husband_name": {"all": False},
         "dob": {
             "age_verification": True, "identity_verification": True,
@@ -83,6 +93,7 @@ NECESSITY_MATRIX = {
             "age_verification": False, "identity_verification": False,
             "address_proof": True, "kyc_onboarding": True, "general_upload": False,
         },
+        "photo": {"all": False},
     },
 }
 

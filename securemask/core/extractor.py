@@ -451,6 +451,14 @@ def _dob_broad_scan(
     return None
 
 
+def _strip_blacklisted_tokens(text: str) -> str:
+    """Remove blacklisted tokens from a Devanagari string, keeping only name parts."""
+    tokens = text.split()
+    cleaned = [t for t in tokens if t.lower() not in _NAME_HI_BLACKLIST
+               and t not in ("भारत", "सरकार", "भारतीय")]
+    return " ".join(cleaned)
+
+
 def _is_valid_devanagari_name(text: str) -> bool:
     tokens = [t for t in text.split() if re.search(r"[\u0900-\u097F]{2,}", t)]
     if len(tokens) < 2:
@@ -460,10 +468,10 @@ def _is_valid_devanagari_name(text: str) -> bool:
     if tokens[0] in ("भारत", "सरकार", "भारतीय"):
         return False
     total_len = sum(len(t) for t in tokens)
-    # Prefer person names (3+ words or long 2-word Marathi/Hindi names)
+    # Person names: 3+ tokens need >= 6 chars total, 2 tokens need >= 6 chars
     if len(tokens) >= 3:
-        return total_len >= 10
-    return total_len >= 12 and all(len(t) >= 3 for t in tokens)
+        return total_len >= 6
+    return total_len >= 6 and all(len(t) >= 2 for t in tokens)
 
 
 def _name_hi_broad_scan(
@@ -523,16 +531,19 @@ def _name_hi_broad_scan(
         if run:
             merged_runs.append(" ".join(run))
         for cand in merged_runs:
-            if _is_valid_devanagari_name(cand):
-                bbox = find_devanagari_bbox(cand, words)
-                logger.info("Devanagari name merged tokens: %s", cand)
+            # Strip blacklisted tokens (e.g. पुरुष, जन्म) that OCR may merge with name
+            cleaned_cand = _strip_blacklisted_tokens(cand)
+            check_cand = cleaned_cand if cleaned_cand != cand else cand
+            if _is_valid_devanagari_name(check_cand):
+                bbox = find_devanagari_bbox(check_cand, words)
+                logger.info("Devanagari name merged tokens: %s", check_cand)
                 return DetectedField(
                     field_name="name_hi",
-                    field_value=cand,
+                    field_value=check_cand,
                     sensitivity_weight=5,
                     detection_method="regex_fuzzy",
                     confidence=0.78,
-                    bounding_box=bbox or _find_bbox_in_words(cand.split()[0], words),
+                    bounding_box=bbox or _find_bbox_in_words(check_cand.split()[0], words),
                     always_redact=False,
                 )
 

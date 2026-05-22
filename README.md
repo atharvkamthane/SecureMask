@@ -2,15 +2,17 @@
 
 SecureMask is an AI-powered Document Privacy Protection System that detects personally identifiable information (PII) in Indian identity documents, classifies the document type using a trained CNN, evaluates data necessity based on declared context, computes a Privacy Exposure Index (PEI) score, and enables pixel-level redaction of sensitive fields before download.
 
+> **Latest Improvements (v2.1):** Dual English+Hindi OCR pipeline, improved Devanagari name detection, context-aware smart recommendations, white/black redaction colors, pixel-accurate bounding box overlays, and security hardening.
+
 ## Supported Document Types
 
-| # | Document            | Key Fields Detected                                                    |
-|---|---------------------|------------------------------------------------------------------------|
-| 1 | Aadhaar Card        | Aadhaar number, name, DOB, gender, address, phone, QR code            |
-| 2 | PAN Card            | PAN number, name, father's name, DOB, signature                       |
-| 3 | Driving Licence     | DL number, name, DOB, address, blood group                            |
-| 4 | Passport            | Passport number, name, DOB, place of birth, expiry, father/spouse, MRZ|
-| 5 | Voter ID (EPIC)     | EPIC number, name, father/husband name, DOB, gender, address          |
+| # | Document            | Key Fields Detected                                                                   |
+|---|---------------------|---------------------------------------------------------------------------------------|
+| 1 | Aadhaar Card        | Aadhaar number, name (EN + Hindi), DOB, gender, address, phone, photo, QR code        |
+| 2 | PAN Card            | PAN number, name (EN + Hindi), father's name, DOB, photo, signature                   |
+| 3 | Driving Licence     | DL number, name (EN + Hindi), DOB, address, blood group, photo                        |
+| 4 | Passport            | Passport number, name (EN + Hindi), DOB, place of birth, expiry, father/spouse, MRZ, photo |
+| 5 | Voter ID (EPIC)     | EPIC number, name (EN + Hindi), father/husband name, DOB, gender, address, photo      |
 
 ## Detailed Pipeline & Architecture (How It Works)
 
@@ -26,10 +28,10 @@ Before text is read, the image must be normalized to counter bad lighting, shado
 - **Color Correction**: Converts to Grayscale, then applies **CLAHE** (Contrast Limited Adaptive Histogram Equalization) to balance lighting across the document (fixing dark shadows on physical ID photos). 
 - **Binarization**: Otsu's thresholding transforms it into high-contrast black-and-white for the OCR engine.
 
-### 3. OCR Text Extraction (Multi-Engine Chain)
-Extracts raw text and word-level coordinate bounding boxes (`[x, y, width, height]`). To guarantee reliable results across multiple situations, a fallback strategy is utilized:
-- **PaddleOCR (Primary)**: Highly optimized open-source, local DL model (PP-OCRv4) utilized for strong Hindi/English multi-language support.
-- **EasyOCR (Fallback)**: Used to rescue severely noisy structural anomalies if the primary engine outputs average confidence scores below the `< 0.72` threshold. 
+### 3. OCR Text Extraction (Dual-Language Pipeline)
+Extracts raw text and word-level coordinate bounding boxes (`[x, y, width, height]`). A dual-language strategy ensures both English and Devanagari text are captured:
+- **PaddleOCR English + Hindi (Primary)**: Both English (PP-OCRv5) and Hindi PaddleOCR models run in parallel on every document. Non-overlapping Hindi words are merged into the English result, ensuring Devanagari names and labels are always captured alongside Latin text.
+- **EasyOCR (Fallback)**: Used when PaddleOCR produces insufficient words (below the minimum threshold). Supports English + Hindi with phrase-level token splitting for accurate word bounding boxes.
 
 ### 4. Machine Learning Document Classification
 Once text is read, SecureMask determines *what* the document is:
@@ -39,12 +41,13 @@ Once text is read, SecureMask determines *what* the document is:
 ### 5. Multi-Engine PII Extraction
 This is the core logic. It maps OCR data against a heavily-defined schema per document type mapping specific coordinates to precise privacy risk zones.
 - **Regex + Fuzzy Matching**: Uses `rapidfuzz` combined with sliding window techniques. Example: Detecting "DOB" next to a date string, even if OCR misread it as "D0B" or "QOB".
-- **NER (Named Entity Recognition)**: Natural language processing utilizing `HuggingFace IndicNER` (and `spaCy` en_core_web_sm fallback) extracts disconnected nouns to determine arbitrary names and addresses that don’t automatically fit standard regex patterns.
-- **QR / XML Decryption**: Finds QR regions (`pyzbar`) on Aadhaar cards, zlib-decompresses the binary data, and extracts the raw unencrypted XML string securely to cross-verify ID details.
+- **Devanagari Name Detection**: Merges consecutive Devanagari OCR tokens, strips blacklisted institutional words (e.g. "भारत", "सरकार"), and validates name candidates via character-length heuristics. Supports names with 2+ tokens and 6+ total characters.
+- **NER (Named Entity Recognition)**: Natural language processing utilizing `HuggingFace IndicNER` (and `spaCy` en_core_web_sm fallback) extracts disconnected nouns to determine arbitrary names and addresses that don't automatically fit standard regex patterns.
+- **QR / XML Decryption**: Finds QR regions (`pyzbar`) on Aadhaar cards, zlib-decompresses the binary data, and extracts the raw unencrypted XML string securely to cross-verify ID details. Includes XXE protection via DOCTYPE stripping.
 - **Computer Vision Extraction**: Utilizes Haar Cascade classifiers to find physical Human Faces and Signature blobs which classify as high-risk biometric PII.
 
 ### 6. Context-Aware Necessity Classification
-A compliance engine reads the user’s declared `context` parameter (`address_proof`, `kyc_onboarding`, `restricted_age_verification`) and compares it against a 5x5 Matrix to determine if every extracted field is definitively *required* or an *excess violation*.
+A compliance engine reads the user's declared `context` parameter (`address_proof`, `kyc_onboarding`, `identity_verification`, `age_verification`, `general_upload`) and compares it against a comprehensive necessity matrix (5 document types × 5 contexts) to determine if every extracted field is definitively *required* or an *excess violation*. The matrix covers all detected fields including `name_hi` (Hindi name), `photo`, and `signature`.
 
 ### 7. Privacy Exposure Index (PEI) Scoring
 Calculates a numerical risk severity score (0-100) using mathematical compliance metrics.
@@ -52,14 +55,17 @@ Calculates a numerical risk severity score (0-100) using mathematical compliance
 - Legally required fields are weighted lightly at `x2`.
 - PEI acts as a dynamic visual gauge to illustrate GDPR and DPDP compliance risk.
 
-### 8. Explainability Engine
-Generates plain-English, method-aware audit warnings. (e.g., *"Aadhaar UID was flagged due to regex structure. In Address Verification context, it is an excess field and should be masked to adhere to DPDP regulations."*)
+### 8. Smart Recommendations + Explainability
+- **Context-Aware Recommendations**: Each detected field receives a suggested action (`allow`, `mask`, or `redact`) based on the necessity classification. Suggestions use human-readable field labels (e.g., "The Aadhaar number is needed for identity verification, but showing only the last few digits reduces fraud risk.").
+- **Explainability Engine**: Generates plain-English, method-aware audit explanations (e.g., *"name detected because the extracted text 'Atharv Murhari Kamthane' matches the aadhaar identifier pattern (confidence: 95%)."*).
 
 ### 9. Redaction Engine
 Generates a new, anonymized file payload:
 - Excludes user-defined "allowed" bounding boxes, parsing exact coordinate overlaps.
-- Uses `Pillow` (PIL) to draw mathematically exact black-out pixel redactions over the original raw image.
-- Saves safely to `storage/redacted/<scan_id>/safe.png`, severing unredacted ties to the final client output.
+- **Redact mode**: Applies a **white** `(255, 255, 255)` rectangle over the bounding box for clean, visible removal.
+- **Mask mode**: Applies a **black** `(0, 0, 0)` rectangle over the leading portion, leaving the last few characters visible for partial verification.
+- Uses `Pillow` (PIL) for pixel-level precision with configurable padding per field type.
+- Saves safely to `storage/redacted/<scan_id>/redacted.png`, severing unredacted ties to the final client output.
 
 ## Tech Stack
 
@@ -210,18 +216,19 @@ SecureMask/
 │   ├── api/
 │   │   └── routes.py            # REST endpoints + Pydantic response models
 │   ├── core/
-│   │   ├── ocr.py               # PaddleOCR → EasyOCR chain
+│   │   ├── ocr.py               # Dual EN+HI PaddleOCR → EasyOCR fallback
 │   │   ├── classifier.py        # MobileNetV2 CNN + keyword fallback
-│   │   ├── extractor.py         # Multi-engine field extraction coordinator
+│   │   ├── extractor.py         # Multi-engine field extraction + Devanagari name scan
 │   │   ├── fuzzy_regex.py       # Regex + rapidfuzz sliding-window matcher
 │   │   ├── mrz.py               # Passport MRZ parser (passporteye + regex)
 │   │   ├── ner.py               # HuggingFace IndicNER + spaCy NER
-│   │   ├── qr.py                # pyzbar QR decoder + Aadhaar XML parser
+│   │   ├── qr.py                # pyzbar QR decoder + Aadhaar XML parser (XXE-safe)
 │   │   ├── preprocessor.py      # OpenCV image preprocessing pipeline
-│   │   ├── necessity.py         # 5×5 necessity matrix
+│   │   ├── necessity.py         # Comprehensive necessity matrix (5 doc types × 5 contexts)
+│   │   ├── recommendations.py   # Context-aware smart action suggestions
 │   │   ├── pei.py               # PEI scoring formula
 │   │   ├── explainer.py         # Method-aware explanations
-│   │   ├── redactor.py          # PIL-based image redaction (black box + partial mask)
+│   │   ├── redactor.py          # PIL-based redaction (white) + masking (black)
 │   │   └── audit.py             # Audit report builder
 │   ├── schemas/
 │   │   ├── base.py              # FieldSchema dataclass
@@ -287,6 +294,27 @@ python -m securemask.ml.generate_synthetic
 # Train MobileNetV2 (20 epochs, saves best checkpoint)
 python -m securemask.ml.train_classifier
 ```
+
+## Security
+
+- **Path traversal protection**: Uploaded filenames are sanitised to prevent directory traversal attacks.
+- **File size limit**: Maximum upload size is 20 MB.
+- **File type validation**: Only `.jpg`, `.jpeg`, `.png`, and `.pdf` extensions are accepted.
+- **XXE prevention**: XML parsing in QR decoder strips DOCTYPE declarations.
+- **SQLite connection management**: All database connections are properly closed with `try/finally` patterns.
+
+## Recent Changelog
+
+### v2.1 — Hindi OCR, Smart Recommendations & Hardening
+
+- **Dual OCR pipeline**: English + Hindi PaddleOCR always run in parallel; non-overlapping Hindi words are merged into the final result.
+- **Devanagari name detection**: Relaxed validation thresholds, added blacklist-stripping for merged OCR token runs.
+- **Redaction colors**: `redact` → white rectangle (clean removal), `mask` → black rectangle (partial concealment).
+- **Smart recommendations**: Context-aware field suggestions with human-readable labels (17 field types mapped).
+- **Necessity matrix expanded**: Added `name_hi`, `photo`, `signature` fields across all 5 document types.
+- **Frontend bbox fix**: Bounding box overlays now use pixel-based positioning via `ResizeObserver` for precise alignment.
+- **Security hardening**: Path traversal fix, file size/type validation, XXE prevention, SQLite connection leak fixes.
+- **Code cleanup**: Removed debug logging functions, dead code, and unused dependencies.
 
 ## License
 

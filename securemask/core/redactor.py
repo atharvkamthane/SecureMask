@@ -1,16 +1,15 @@
 """Image redaction engine.
 
 Modes:
-  - redact: adaptive paper-colored rectangle over bounding box + padding
-  - mask: partial mask that hides the leading part and leaves the tail visible
-  - always_redact: forced full redaction regardless of user decision
+  - redact: white rectangle over bounding box + padding (clean removal)
+  - mask: partial black mask that hides the leading part and leaves the tail visible
+  - always_redact: forced full white redaction regardless of user decision
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-import numpy as np
 from PIL import Image, ImageDraw
 
 from securemask.models.detected_field import BoundingBox, DetectedField
@@ -18,7 +17,9 @@ from securemask.models.detected_field import BoundingBox, DetectedField
 logger = logging.getLogger(__name__)
 from securemask.config import IDENTIFIER_FIELDS
 
-
+# Fixed redaction colors
+_REDACT_FILL = (255, 255, 255)  # white — clean removal
+_MASK_FILL = (0, 0, 0)          # black — partial concealment
 
 
 class Redactor:
@@ -39,36 +40,6 @@ class Redactor:
                 max(1, int(p.height / 100 * img_h)),
             )
         return field.bounding_box
-
-    def _background_fill(self, img: Image.Image, box: tuple[int, int, int, int]) -> tuple[int, int, int]:
-        """Estimate local document background so the redaction blends with the page."""
-        x, y, x2, y2 = box
-        sample_pad = max(self.PADDING * 3, 12)
-        sx = max(0, x - sample_pad)
-        sy = max(0, y - sample_pad)
-        sx2 = min(img.width, x2 + sample_pad)
-        sy2 = min(img.height, y2 + sample_pad)
-
-        region = np.asarray(img.crop((sx, sy, sx2, sy2)).convert("RGB"))
-        if region.size == 0:
-            return (255, 255, 255)
-
-        mask = np.ones(region.shape[:2], dtype=bool)
-        inner_x1 = max(0, x - sx)
-        inner_y1 = max(0, y - sy)
-        inner_x2 = min(region.shape[1], x2 - sx)
-        inner_y2 = min(region.shape[0], y2 - sy)
-        mask[inner_y1:inner_y2, inner_x1:inner_x2] = False
-
-        samples = region[mask]
-        if samples.size == 0:
-            samples = region.reshape(-1, 3)
-
-        luminance = samples.mean(axis=1)
-        light_samples = samples[luminance >= 170]
-        chosen = light_samples if len(light_samples) >= 12 else samples
-        median = np.median(chosen, axis=0)
-        return tuple(int(v) for v in median)
 
     def redact(
         self,
@@ -103,10 +74,8 @@ class Redactor:
             if x2 <= x or y2 <= y:
                 continue
 
-            fill = self._background_fill(img, (x, y, x2, y2))
-
             if decision == "redact":
-                draw.rectangle([x, y, x2, y2], fill=fill)
+                draw.rectangle([x, y, x2, y2], fill=_REDACT_FILL)
             elif decision == "mask":
                 box_width = max(1, x2 - x)
                 visible_ratio = 0.15 if field.field_name in IDENTIFIER_FIELDS else 0.28
@@ -115,9 +84,7 @@ class Redactor:
                     max(self.MIN_MASK_VISIBLE_PX, int(box_width * visible_ratio)),
                     box_width,
                 )
-                draw.rectangle([x, y, max(x, x2 - visible_width), y2], fill=fill)
-
-
+                draw.rectangle([x, y, max(x, x2 - visible_width), y2], fill=_MASK_FILL)
 
         return img
 

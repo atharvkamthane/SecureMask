@@ -1,6 +1,40 @@
+import { useRef, useState, useEffect, useCallback } from 'react'
 import { ImageOff } from 'lucide-react'
 
 export default function DocumentPreview({ imageUrl, fields = [], decisions = {}, hoveredField, onFieldHover }) {
+  const imgRef = useRef(null)
+  const containerRef = useRef(null)
+  const [imgRect, setImgRect] = useState(null)
+
+  // Track the actual rendered image position and size within its container
+  const updateImgRect = useCallback(() => {
+    if (imgRef.current && containerRef.current) {
+      const imgEl = imgRef.current
+      const containerEl = containerRef.current
+      const containerRect = containerEl.getBoundingClientRect()
+      const imgBounds = imgEl.getBoundingClientRect()
+
+      setImgRect({
+        left: imgBounds.left - containerRect.left,
+        top: imgBounds.top - containerRect.top,
+        width: imgBounds.width,
+        height: imgBounds.height,
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    updateImgRect()
+    const observer = new ResizeObserver(updateImgRect)
+    if (containerRef.current) observer.observe(containerRef.current)
+    if (imgRef.current) observer.observe(imgRef.current)
+    window.addEventListener('resize', updateImgRect)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateImgRect)
+    }
+  }, [updateImgRect, imageUrl])
+
   if (!imageUrl) {
     return (
       <div className="bg-bg-surface border border-border rounded-[var(--r-lg)] flex flex-col items-center justify-center py-20 text-text-3">
@@ -12,21 +46,27 @@ export default function DocumentPreview({ imageUrl, fields = [], decisions = {},
   }
 
   return (
-    <div className="relative bg-bg-surface border border-border rounded-[var(--r-lg)] overflow-hidden">
-      <img src={imageUrl} alt="Document" className="w-full h-auto block" />
-      {fields.map((f, i) => {
+    <div ref={containerRef} className="relative bg-bg-surface border border-border rounded-[var(--r-lg)] overflow-hidden">
+      <img
+        ref={imgRef}
+        src={imageUrl}
+        alt="Document"
+        className="w-full h-auto block"
+        onLoad={updateImgRect}
+      />
+      {imgRect && fields.map((f, i) => {
         // Use percentage bounding box from the backend
         const bbox = f.bounding_box_pct || f.bounding_box
         if (!bbox) return null
 
-        // bbox is an object with {x, y, width, height} in percentage (0-100)
-        const x = bbox.x
-        const y = bbox.y
-        const w = bbox.width
-        const h = bbox.height
+        // Convert percentage coordinates to pixel positions relative to rendered image
+        const pixelLeft = imgRect.left + (bbox.x / 100) * imgRect.width
+        const pixelTop = imgRect.top + (bbox.y / 100) * imgRect.height
+        const pixelWidth = (bbox.width / 100) * imgRect.width
+        const pixelHeight = (bbox.height / 100) * imgRect.height
 
         // Skip invalid boxes
-        if (w <= 0 || h <= 0) return null
+        if (pixelWidth <= 0 || pixelHeight <= 0) return null
 
         const decision = decisions[f.field_name] || 'redact'
         const isHovered = hoveredField === f.field_name
@@ -39,10 +79,10 @@ export default function DocumentPreview({ imageUrl, fields = [], decisions = {},
             onMouseLeave={() => onFieldHover?.(null)}
             className="absolute border-2 rounded-sm cursor-pointer transition-opacity"
             style={{
-              left: `${x}%`,
-              top: `${y}%`,
-              width: `${w}%`,
-              height: `${h}%`,
+              left: `${pixelLeft}px`,
+              top: `${pixelTop}px`,
+              width: `${pixelWidth}px`,
+              height: `${pixelHeight}px`,
               borderColor: color,
               backgroundColor: isHovered ? color + '20' : color + '08',
               boxShadow: isHovered ? `0 0 12px ${color}40` : 'none',
