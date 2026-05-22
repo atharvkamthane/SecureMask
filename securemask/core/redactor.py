@@ -16,10 +16,7 @@ from PIL import Image, ImageDraw
 from securemask.models.detected_field import BoundingBox, DetectedField
 
 logger = logging.getLogger(__name__)
-
-IDENTIFIER_FIELDS = {
-    "aadhaar_number", "pan_number", "passport_number", "dl_number", "epic_number",
-}
+from securemask.config import IDENTIFIER_FIELDS
 
 
 

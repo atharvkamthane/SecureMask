@@ -44,6 +44,14 @@ UNIVERSAL_REGEX_PATTERNS = {
     "date_pattern": (r"\b(0?[1-9]|[12][0-9]|3[01])[\/\-](0?[1-9]|1[012])[\/\-]\d{4}\b", 4, "date pattern"),
 }
 
+IDENTIFIER_FIELDS = {
+    "aadhaar_number",
+    "pan_number",
+    "passport_number",
+    "dl_number",
+    "epic_number",
+}
+
 
 def ensure_storage_dirs() -> None:
     for path in (STORAGE_DIR, UPLOAD_DIR, PROCESSED_DIR, REDACTED_DIR, ML_WEIGHTS_DIR):

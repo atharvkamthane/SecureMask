@@ -6,13 +6,7 @@ from dataclasses import dataclass
 from securemask.models.detected_field import DetectedField
 
 
-IDENTIFIER_FIELDS = {
-    "aadhaar_number",
-    "pan_number",
-    "passport_number",
-    "dl_number",
-    "epic_number",
-}
+from securemask.config import IDENTIFIER_FIELDS
 
 VISUAL_SECRET_FIELDS = {"photo", "signature", "qr_code", "mrz_lines"}
 AGE_FIELDS = {"dob", "date_of_birth"}
