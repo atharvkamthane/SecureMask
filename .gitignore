@@ -15,3 +15,24 @@ coverage/
 *.json
 securemask.db
 securemask/ml/synthetic_data/
+*.png
+*.jpg
+*.jpeg
+!f475c16a-1fa2-408b-b3ab-7f1eaa267a7a.jpg
+
+# IDE / Editor configurations
+.cursor/
+.cursor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs and databases
+*.log
+securemask.sqlite3
+*.sqlite3
+db.sqlite3

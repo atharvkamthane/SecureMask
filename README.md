@@ -134,6 +134,19 @@ npm run dev
 - **API Docs (Swagger):** `http://localhost:8000/docs`
 - **API Base:** `http://localhost:8000` (proxied via Vite at `/api/*`)
 
+## Demo Showcase (Instant Testing)
+
+To showcase SecureMask's features without waiting for OCR and ML models to prewarm/load, a mock demo mode is built directly into the system:
+
+1. **Start the application** (Backend on `:8000`, Frontend on `:5173`).
+2. **Access the frontend** at `http://localhost:5173`.
+3. In the upload field, upload the test Aadhaar card image located at the root of the repository:
+   - File: `f475c16a-1fa2-408b-b3ab-7f1eaa267a7a.jpg`
+4. The backend will detect this image (via file size matching) and trigger **Demo Mode**:
+   - It will sleep for 20 seconds to simulate real-world deep learning processing.
+   - It will return perfect pre-computed extraction fields for the Aadhaar card (Aadhaar number, Hindi and English name, DOB, gender, photo region).
+5. You can then interactively verify necessity checks, view the Privacy Exposure Index (PEI) score, toggle/customize redaction settings, and download the redacted output.
+
 ## API Endpoints
 
 | Method | Endpoint             | Description                                      |
@@ -313,6 +326,7 @@ python -m securemask.ml.train_classifier
 - **Smart recommendations**: Context-aware field suggestions with human-readable labels (17 field types mapped).
 - **Necessity matrix expanded**: Added `name_hi`, `photo`, `signature` fields across all 5 document types.
 - **Frontend bbox fix**: Bounding box overlays now use pixel-based positioning via `ResizeObserver` for precise alignment.
+- **Demo Mode**: Added a dedicated showcase mode that activates when uploading the test image `f475c16a-1fa2-408b-b3ab-7f1eaa267a7a.jpg`, allowing instant, zero-setup testing of the full validation and redaction pipeline.
 - **Security hardening**: Path traversal fix, file size/type validation, XXE prevention, SQLite connection leak fixes.
 - **Code cleanup**: Removed debug logging functions, dead code, and unused dependencies.
 

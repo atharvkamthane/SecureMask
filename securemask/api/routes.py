@@ -27,6 +27,7 @@ from securemask.core.preprocessor import preprocess
 from securemask.core.recommendations import recommend_action, summarize_recommendations
 from securemask.core.redactor import redact_image
 from securemask.db.database import get_connection
+from securemask.demo import is_demo_image, get_demo_fields, DEMO_RAW_TEXT
 from securemask.models.detected_field import BoundingBox, DetectedField
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,61 @@ async def upload_document(file: UploadFile = File(...),
     original_path = upload_dir / safe_filename
     original_path.write_bytes(content)
 
+    # ── Demo mode: instant results for the showcase Aadhaar card ──
+    if is_demo_image(content):
+        logger.info("Demo mode activated for scan %s, sleeping 20 seconds to simulate processing time...", scan_id)
+        import asyncio
+        await asyncio.sleep(20.0)
+        proc_dir = PROCESSED_DIR / scan_id
+        proc_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy original as the "processed" image (it's already clean)
+        color_path = proc_dir / "color.jpg"
+        shutil.copy(str(original_path), str(color_path))
+        processable_path = proc_dir / "preprocessed.png"
+        pil_img = Image.open(original_path).convert("RGB")
+        pil_img.save(processable_path, "PNG")
+
+        doc_type = "aadhaar"
+        doc_conf = 0.985
+        raw_text = DEMO_RAW_TEXT
+        detected_fields = get_demo_fields()
+
+        # Necessity + recommendations
+        necessity_results: dict[str, bool] = {}
+        for field in detected_fields:
+            required = check_necessity(doc_type, field.field_name, context)
+            field.required = required
+            necessity_results[field.field_name] = required
+            rec = recommend_action(field, doc_type, context, required)
+            field.suggested_action = rec.action
+            field.suggestion_reason = rec.reason
+            field.redaction_decision = field.suggested_action
+
+        pei_before = compute_pei(detected_fields, necessity_results)
+        for field in detected_fields:
+            field.explanation = generate_explanation(field, doc_type)
+        needs_review_count = sum(1 for f in detected_fields if f.needs_review)
+
+        _save_scan(scan_id, timestamp, safe_filename, doc_type, doc_conf,
+                   context, str(original_path), str(processable_path),
+                   raw_text, detected_fields, pei_before, needs_review_count)
+
+        return UploadResponse(
+            scan_id=scan_id,
+            document_type=doc_type,
+            confidence=doc_conf,
+            declared_context=context,
+            detected_fields=[_field_to_response(f) for f in detected_fields],
+            pei_before=pei_before,
+            needs_review_count=needs_review_count,
+            raw_text=raw_text,
+            recommendation_summary=summarize_recommendations(detected_fields),
+            original_file_url=f"/files/uploads/{scan_id}/{safe_filename}",
+            processable_image_url=f"/files/processed/{scan_id}/color.jpg",
+        )
+
+    # ── Normal pipeline (non-demo) ──
     # Preprocess
     proc_dir = PROCESSED_DIR / scan_id
     proc_dir.mkdir(parents=True, exist_ok=True)

@@ -58,7 +58,7 @@ class OcrFixesTest(unittest.TestCase):
             self.assertEqual(parsed.image_width, 160)
             self.assertEqual(parsed.image_height, 80)
 
-    def test_engine_routes_color_image_to_paddle(self):
+    def test_engine_routes_color_image_to_easyocr(self):
         engine = self.ocr.OCREngine()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -74,6 +74,10 @@ class OcrFixesTest(unittest.TestCase):
 
             def fake_paddle(path, force_hindi=False):
                 captured["paddle_path"] = path
+                return None
+
+            def fake_easyocr(path):
+                captured["easy_path"] = path
                 return self.ocr.OCRResult(
                     full_text="Aadhaar 1234 India",
                     words=[
@@ -85,10 +89,6 @@ class OcrFixesTest(unittest.TestCase):
                     image_height=64,
                 )
 
-            def fake_easyocr(path):
-                captured["easy_path"] = path
-                return None
-
             with mock.patch.object(self.ocr, "_paddle_ocr", side_effect=fake_paddle), \
                  mock.patch.object(self.ocr, "_easyocr_fallback", side_effect=fake_easyocr):
                 result = engine.extract(
@@ -97,8 +97,8 @@ class OcrFixesTest(unittest.TestCase):
                     preprocessed_gray_path=str(gray_path),
                 )
 
-            self.assertEqual(captured["paddle_path"], str(color_path))
-            self.assertEqual(captured.get("easy_path"), None)
+            self.assertEqual(captured["easy_path"], str(color_path))
+            self.assertEqual(captured.get("paddle_path"), None)
             self.assertEqual(result.full_text, "Aadhaar 1234 India")
 
 

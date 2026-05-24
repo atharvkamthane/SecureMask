@@ -526,35 +526,35 @@ class OCREngine:
         # Both engines get the COLOR image — see class docstring for why
         color_path = str(preprocessed_color_path) if preprocessed_color_path else raw_path
 
-        # ---- 1. PaddleOCR ----
-        paddle_result = _paddle_ocr(color_path)
-        paddle_ok = (
-            paddle_result is not None
-            and len(paddle_result.words) >= MIN_WORDS_THRESHOLD
+        # ---- 1. EasyOCR ----
+        easy_result = _easyocr_fallback(color_path)
+        easy_ok = (
+            easy_result is not None
+            and len(easy_result.words) >= MIN_WORDS_THRESHOLD
         )
 
-        if paddle_ok:
+        if easy_ok:
             logger.info(
-                "OCR engine: paddle — %d words @ conf %.2f",
-                len(paddle_result.words), paddle_result.avg_confidence,
+                "OCR engine: EasyOCR — %d words @ conf %.2f",
+                len(easy_result.words), easy_result.avg_confidence,
             )
-            return self._finalize(paddle_result)
-
-        # ---- 2. EasyOCR (fallback when Paddle fails) ----
-        easy_result = _easyocr_fallback(color_path)
-
-        low_conf  = paddle_result.avg_confidence if paddle_result else 0.0
-        low_words = len(paddle_result.words)      if paddle_result else 0
-        logger.info("PaddleOCR unavailable (conf=%.2f, words=%d) — using EasyOCR",
-                    low_conf, low_words)
-
-        if easy_result and easy_result.words:
-            logger.info("OCR engine: EasyOCR — %d words @ conf %.2f",
-                        len(easy_result.words), easy_result.avg_confidence)
             return self._finalize(easy_result)
 
+        # ---- 2. PaddleOCR (fallback when EasyOCR fails) ----
+        paddle_result = _paddle_ocr(color_path)
+
+        low_conf  = easy_result.avg_confidence if easy_result else 0.0
+        low_words = len(easy_result.words)      if easy_result else 0
+        logger.info("EasyOCR unavailable (conf=%.2f, words=%d) — using PaddleOCR",
+                    low_conf, low_words)
+
+        if paddle_result and paddle_result.words:
+            logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
+                        len(paddle_result.words), paddle_result.avg_confidence)
+            return self._finalize(paddle_result)
+
         # Best-effort
-        for candidate in (paddle_result, easy_result):
+        for candidate in (easy_result, paddle_result):
             if candidate and candidate.words:
                 logger.warning("OCR: returning partial result as best-effort")
                 return self._finalize(candidate)
