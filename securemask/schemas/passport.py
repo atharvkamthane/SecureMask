@@ -6,7 +6,8 @@ fields = [
         field_name="passport_number",
         sensitivity_weight=10,
         extraction_method="mrz_primary_regex_fallback",
-        regex_pattern=r"\b[A-PR-WY][1-9]\d{7}\b",
+        # Indian passport booklet number: one letter followed by seven digits.
+        regex_pattern=r"\b[A-Z]\d{7}\b",
         fuzzy_threshold=90,
         anchor_keywords=["passport no", "passport number"],
         zone="top",
@@ -51,13 +52,6 @@ fields = [
         fuzzy_threshold=80,
         anchor_keywords=["date of expiry", "expiry", "doe"],
         zone="bottom",
-    ),
-    FieldSchema(
-        field_name="father_spouse_name",
-        sensitivity_weight=4,
-        extraction_method="ner",
-        anchor_keywords=["father", "spouse", "legal guardian"],
-        zone="middle",
     ),
     FieldSchema(
         field_name="photo",

@@ -55,7 +55,7 @@ _KEYWORD_SETS = {
             "given name", "place of birth", "date of expiry",
             "country code", "ind", "machine readable",
         ],
-        "patterns": [r"[A-PR-WY][1-9]\d{7}", r"P<IND"],
+        "patterns": [r"[A-Z]\d{7}", r"P<IND"],
     },
     "driving_license": {
         "keywords": [
@@ -64,7 +64,7 @@ _KEYWORD_SETS = {
             "motor vehicle act", "rto", "regional transport",
             "validity", "cov", "non transport",
         ],
-        "patterns": [r"[A-Z]{2}\d{2}[A-Z]{0,2}\d{4,7}"],
+        "patterns": [r"[A-Z]{2}[-\s]?\d{2}[-\s]?(?:(?:19|20)\d{2}[-\s]?)?\d{4,8}"],
     },
     "voter_id": {
         "keywords": [

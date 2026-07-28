@@ -1,14 +1,12 @@
-"""QR code decoder for Aadhaar cards.
+"""QR detection for Aadhaar cards.
 
-Aadhaar QR encodes resident XML data. Decodes using pyzbar,
-parses XML (handles both raw XML and zlib-compressed newer format).
+Current UIDAI Secure QR payloads are signed binary data, not plain XML. This
+module therefore detects their region for redaction but deliberately does not
+turn an unverified QR payload into authoritative identity fields.
 """
 from __future__ import annotations
 
 import logging
-import re
-import xml.etree.ElementTree as ET
-import zlib
 
 import cv2
 import numpy as np
@@ -21,74 +19,26 @@ logger = logging.getLogger(__name__)
 
 
 class QRDecoder:
-    """Decode QR codes from document images, with Aadhaar XML parsing."""
+    """Detect QR codes and reserve demographic decoding for a verified reader."""
 
     def decode(self, image: Image.Image) -> dict | None:
-        """Decode Aadhaar QR code and return parsed fields.
+        """Return no demographics until UIDAI signature verification is available.
 
-        Returns dict with: aadhaar_number, name, dob, gender, address, phone.
-        Or None if no valid QR found.
+        ``pyzbar`` exposes bytes only; it cannot verify UIDAI's digital
+        signature or decode the current secure-QR binary format. Returning
+        fields from arbitrary XML-like bytes would let an untrusted QR override
+        OCR results with fabricated personal data.
         """
         try:
             cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             decoded = pyzbar.decode(cv_image)
-
-            if not decoded:
-                return None
-
-            raw = decoded[0].data
-
-            # Try direct XML parse
-            root = None
-            try:
-                # Strip DOCTYPE to prevent XXE attacks
-                clean_raw = re.sub(b'<!DOCTYPE[^>]*>', b'', raw, flags=re.IGNORECASE)
-                root = ET.fromstring(clean_raw)
-            except ET.ParseError:
-                # Try decompressing (newer Aadhaar QR is zlib compressed)
-                try:
-                    decompressed = zlib.decompress(raw, -zlib.MAX_WBITS)
-                    clean_decompressed = re.sub(b'<!DOCTYPE[^>]*>', b'', decompressed, flags=re.IGNORECASE)
-                    root = ET.fromstring(clean_decompressed)
-                except Exception:
-                    # Try with different wbits
-                    try:
-                        decompressed = zlib.decompress(raw)
-                        clean_decompressed = re.sub(b'<!DOCTYPE[^>]*>', b'', decompressed, flags=re.IGNORECASE)
-                        root = ET.fromstring(clean_decompressed)
-                    except Exception:
-                        logger.debug("QR data is not parseable XML")
-                        return None
-
-            if root is None:
-                return None
-
-            return {
-                "aadhaar_number": root.attrib.get("uid", ""),
-                "name": root.attrib.get("name", ""),
-                "dob": root.attrib.get("dob", ""),
-                "gender": root.attrib.get("gender", ""),
-                "address": self._build_address(root),
-                "phone": root.attrib.get("mobile", ""),
-            }
+            if decoded:
+                logger.info("Aadhaar QR detected; skipping unverified demographic extraction")
+            return None
 
         except Exception as exc:
             logger.debug("QR decode failed: %s", exc)
             return None
-
-    def _build_address(self, root: ET.Element) -> str:
-        """Build address string from Aadhaar QR XML attributes."""
-        parts = [
-            root.attrib.get("house"),
-            root.attrib.get("street"),
-            root.attrib.get("lm"),
-            root.attrib.get("loc"),
-            root.attrib.get("vtc"),
-            root.attrib.get("dist"),
-            root.attrib.get("state"),
-            root.attrib.get("pc"),
-        ]
-        return ", ".join(filter(None, parts))
 
     def detect_qr_regions(self, image: Image.Image) -> list[BoundingBox]:
         """Detect QR code bounding boxes for redaction."""

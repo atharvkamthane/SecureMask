@@ -13,6 +13,10 @@ NECESSITY_MATRIX = {
             "age_verification": True, "identity_verification": True,
             "address_proof": False, "kyc_onboarding": True, "general_upload": False,
         },
+        "year_of_birth": {
+            "age_verification": True, "identity_verification": True,
+            "address_proof": False, "kyc_onboarding": True, "general_upload": False,
+        },
         "gender": {"all": False},
         "address": {
             "age_verification": False, "identity_verification": False,

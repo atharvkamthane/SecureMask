@@ -55,6 +55,16 @@ fields = [
         always_redact=False,
     ),
     FieldSchema(
+        field_name="year_of_birth",
+        sensitivity_weight=4,
+        extraction_method="regex_fuzzy",
+        regex_pattern=r"(?i)(?:year\s+of\s+birth|yob)[^\d]{0,12}(19\d{2}|20\d{2})\b",
+        fuzzy_threshold=80,
+        anchor_keywords=["year of birth", "yob"],
+        zone="top",
+        always_redact=False,
+    ),
+    FieldSchema(
         field_name="gender",
         sensitivity_weight=2,
         extraction_method="regex_fuzzy",

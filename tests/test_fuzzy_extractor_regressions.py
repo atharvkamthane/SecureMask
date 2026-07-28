@@ -85,6 +85,18 @@ class FuzzyRegexRegressionTest(unittest.TestCase):
 
 
 class ExtractorRegressionTest(unittest.TestCase):
+    def test_current_document_identifier_formats(self):
+        self.assertRegex("A1234567", next(s.regex_pattern for s in get_schema("passport") if s.field_name == "passport_number"))
+        self.assertRegex("MH-12-2011-0001234", next(s.regex_pattern for s in get_schema("driving_license") if s.field_name == "dl_number"))
+        epic_pattern = next(s.regex_pattern for s in get_schema("voter_id") if s.field_name == "epic_number")
+        self.assertRegex("ABC1234567", epic_pattern)
+        self.assertRegex("AB12CD34EF56GH78", epic_pattern)
+
+    def test_aadhaar_year_of_birth_is_not_forced_into_dob(self):
+        schema = get_schema("aadhaar")
+        year_schema = next(s for s in schema if s.field_name == "year_of_birth")
+        self.assertRegex("Year of Birth: 2001", year_schema.regex_pattern)
+
     def test_schema_regex_uses_cleaned_ocr_first(self):
         field_extractor = FieldExtractor()
         schema = next(s for s in get_schema("aadhaar") if s.field_name == "aadhaar_number")

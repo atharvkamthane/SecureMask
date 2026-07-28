@@ -6,7 +6,9 @@ fields = [
         field_name="epic_number",
         sensitivity_weight=9,
         extraction_method="regex_fuzzy",
-        regex_pattern=r"\b[A-Z]{3}[0-9]{7}\b",
+        # Current EPIC/FUSN is 3 letters + 7 digits. Older valid EPIC cards
+        # can contain a 16- or 17-character alphanumeric identifier.
+        regex_pattern=r"\b(?:[A-Z]{3}\d{7}|[A-Z0-9]{16,17})\b",
         fuzzy_threshold=80,
         anchor_keywords=["epic no", "elector", "voter id",
                          "election commission", "epic"],

@@ -40,7 +40,7 @@ UNIVERSAL_REGEX_PATTERNS = {
     "email": (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", 6, "email address pattern"),
     "pan_pattern": (r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", 10, "PAN identifier pattern"),
     "aadhaar_pattern": (r"\b\d{4}\s?\d{4}\s?\d{4}\b", 10, "Aadhaar 12-digit identifier pattern"),
-    "passport_pattern": (r"\b[A-PR-WY][1-9]\d{7}\b", 10, "Indian passport identifier pattern"),
+    "passport_pattern": (r"\b[A-Z]\d{7}\b", 10, "Indian passport identifier pattern"),
     "date_pattern": (r"\b(0?[1-9]|[12][0-9]|3[01])[\/\-](0?[1-9]|1[012])[\/\-]\d{4}\b", 4, "date pattern"),
 }
 

@@ -9,7 +9,7 @@ from securemask.models.detected_field import DetectedField
 from securemask.config import IDENTIFIER_FIELDS
 
 VISUAL_SECRET_FIELDS = {"photo", "signature", "qr_code", "mrz_lines"}
-AGE_FIELDS = {"dob", "date_of_birth"}
+AGE_FIELDS = {"dob", "date_of_birth", "year_of_birth"}
 NAME_FIELDS = {"name", "name_hi"}
 
 
@@ -29,6 +29,7 @@ _FIELD_LABELS = {
     "name": "name (English)",
     "name_hi": "name (Hindi/Devanagari)",
     "dob": "date of birth",
+    "year_of_birth": "year of birth",
     "gender": "gender",
     "address": "address",
     "phone": "phone number",

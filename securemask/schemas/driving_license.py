@@ -6,7 +6,9 @@ fields = [
         field_name="dl_number",
         sensitivity_weight=9,
         extraction_method="regex_fuzzy",
-        regex_pattern=r"\b[A-Z]{2}[0-9]{2}[A-Z]{0,2}[0-9]{4,7}\b",
+        # State code + RTO code + optional issue year + serial. Separators are
+        # common on both legacy cards and the current Form-7 layout.
+        regex_pattern=r"\b[A-Z]{2}[-\s]?\d{2}[-\s]?(?:(?:19|20)\d{2}[-\s]?)?\d{4,8}\b",
         fuzzy_threshold=75,
         anchor_keywords=["licence no", "dl no", "driving licence",
                          "license number", "dl number"],
