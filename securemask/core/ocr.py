@@ -45,6 +45,7 @@ SKIP_EASYOCR_PREWARM_ENV = "SECUREMASK_SKIP_OCR_PREWARM"
 PADDLE_CONFIDENCE_THRESHOLD = 0.40
 PADDLE_HINDI_CONFIDENCE_THRESHOLD = 0.45
 MIN_WORDS_THRESHOLD = 3
+MIN_ACCEPTED_AVG_CONFIDENCE = 0.55
 
 
 @dataclass
@@ -246,7 +247,7 @@ def _parse_paddle_result(result, image_path: str) -> OCRResult | None:
 
     words.sort(key=lambda w: (w.bbox.y, w.bbox.x))
     return OCRResult(
-        full_text=" ".join(parts),
+        full_text=" ".join(w.text for w in words),
         words=words,
         image_width=int(img_w),
         image_height=int(img_h),
@@ -531,6 +532,7 @@ class OCREngine:
         easy_ok = (
             easy_result is not None
             and len(easy_result.words) >= MIN_WORDS_THRESHOLD
+            and easy_result.avg_confidence >= MIN_ACCEPTED_AVG_CONFIDENCE
         )
 
         if easy_ok:
@@ -551,6 +553,11 @@ class OCREngine:
         if paddle_result and paddle_result.words:
             logger.info("OCR engine: PaddleOCR — %d words @ conf %.2f",
                         len(paddle_result.words), paddle_result.avg_confidence)
+            if easy_result and easy_result.words and (
+                easy_result.avg_confidence > paddle_result.avg_confidence
+            ):
+                logger.info("OCR engine: retaining higher-confidence EasyOCR result")
+                return self._finalize(easy_result)
             return self._finalize(paddle_result)
 
         # Best-effort

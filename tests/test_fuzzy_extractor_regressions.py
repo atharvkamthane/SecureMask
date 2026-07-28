@@ -69,6 +69,20 @@ class FuzzyRegexRegressionTest(unittest.TestCase):
         self.assertIsNotNone(bbox)
         self.assertGreaterEqual(confidence, 0.88)
 
+    def test_digit_cleaning_does_not_corrupt_pan_identifier(self):
+        self.assertEqual(_clean_for_digits("ABCDP1234F"), "ABCDP1234F")
+
+    def test_expiry_date_can_be_in_the_future(self):
+        extractor = FuzzyRegexExtractor()
+        value, _, _ = extractor.extract(
+            text="Date of expiry: 01/01/2035",
+            pattern=r"\b(0?[1-9]|[12]\d|3[01])[\/\-\.\s](0?[1-9]|1[012])[\/\-\.\s](\d{4})\b",
+            threshold=80,
+            words=_make_words(["Date", "of", "expiry:", "01/01/2035"]),
+            anchor_keywords=["date of expiry", "expiry", "doe"],
+        )
+        self.assertEqual(value, "01/01/2035")
+
 
 class ExtractorRegressionTest(unittest.TestCase):
     def test_schema_regex_uses_cleaned_ocr_first(self):

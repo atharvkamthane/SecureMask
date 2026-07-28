@@ -60,20 +60,24 @@ def _clean_for_digits(text: str) -> str:
     # Token-by-token: only clean tokens that look mostly numeric
     def _clean_token(tok: str) -> str:
         digit_count = sum(1 for c in tok if c.isdigit())
-        if digit_count >= len(tok) * 0.4:  # at least 40% already digits
+        # Do not alter mixed alpha-numeric identifiers such as PAN numbers.
+        if digit_count >= len(tok) * 0.5:
             return tok.translate(_DIGIT_CONFUSION_CLEAN)
         return tok
 
     return re.sub(r'[\w]+', lambda m: _clean_token(m.group()), text)
 
 
-def _validate_date_year(value: str) -> bool:
-    """Return True if value contains no 4-digit year, or has a plausible one."""
+def _validate_date_year(value: str, anchor_context: str = "") -> bool:
+    """Return True if a date-like value has a plausible year for its context."""
     four_digit_nums = re.findall(r'\b(\d{4})\b', value)
     if not four_digit_nums:
         return True
     current_year = _date.today().year
-    return any(1900 <= int(y) <= current_year for y in four_digit_nums)
+    max_year = current_year
+    if any(term in anchor_context.lower() for term in ("expiry", "expires", "doe")):
+        max_year += 25
+    return any(1900 <= int(y) <= max_year for y in four_digit_nums)
 
 
 @dataclass
@@ -219,7 +223,7 @@ class FuzzyRegexExtractor:
             looks_date_like = bool(re.search(r"[\/\-.]", val)) or any(
                 term in anchor_context for term in ("dob", "date", "birth", "yob")
             )
-            if looks_date_like and not _validate_date_year(val):
+            if looks_date_like and not _validate_date_year(val, anchor_context):
                 continue
 
             # Proximity score used only to RANK multiple matches

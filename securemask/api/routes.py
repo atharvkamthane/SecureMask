@@ -5,10 +5,11 @@ import json
 import logging
 import uuid
 import shutil
+from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 from pydantic import BaseModel
@@ -23,7 +24,6 @@ from securemask.core.extractor import FieldExtractor
 from securemask.core.necessity import check_necessity
 from securemask.core.ocr import OCREngine
 from securemask.core.pei import compute_pei, compute_pei_after_redaction
-from securemask.core.preprocessor import preprocess
 from securemask.core.recommendations import recommend_action, summarize_recommendations
 from securemask.core.redactor import redact_image
 from securemask.db.database import get_connection
@@ -168,10 +168,18 @@ async def upload_document(file: UploadFile = File(...),
         raise HTTPException(413, "File too large. Maximum size is 20 MB.")
 
     safe_filename = PurePosixPath(file.filename).name or "upload"
-    ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
+    # The OCR and redaction pipelines operate on raster images. Accepting PDFs
+    # here previously caused an unhandled Pillow/OpenCV failure later on.
+    ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
     file_ext = PurePosixPath(safe_filename).suffix.lower()
     if file_ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"Unsupported file type '{file_ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+
+    try:
+        with Image.open(BytesIO(content)) as uploaded_image:
+            uploaded_image.verify()
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(400, "The uploaded file is not a valid image.") from exc
 
     # Save uploaded file
     upload_dir = UPLOAD_DIR / scan_id
@@ -268,7 +276,10 @@ async def upload_document(file: UploadFile = File(...),
 
     # Extract fields
     extractor = _get_extractor()
-    detected_fields = extractor.extract(ocr_result, pil_color, classification.document_type, str(original_path))
+    # Image-region detection must use the same resized/deskewed image as OCR.
+    # Its coordinates are later rendered against the processed color image.
+    extraction_path = str(variants.get("color", original_path))
+    detected_fields = extractor.extract(ocr_result, pil_color, classification.document_type, extraction_path)
 
     # Necessity check
     necessity_results: dict[str, bool] = {}
@@ -334,12 +345,22 @@ async def redact_document(request: RedactRequest):
         fields_data = json.loads(row["detected_fields_json"])
         fields = [DetectedField.from_dict(f) for f in fields_data]
 
-        # Apply decisions
+        valid_decisions = {"allow", "mask", "redact"}
+        invalid_decisions = set(request.decisions.values()) - valid_decisions
+        if invalid_decisions:
+            raise HTTPException(422, "Decisions must be allow, mask, or redact.")
+
+        # Resolve every field. Missing client keys must not silently become
+        # "allow", otherwise an image can remain exposed while PEI says safe.
+        resolved_decisions: dict[str, str] = {}
         for field in fields:
-            decision = request.decisions.get(field.field_name, "allow")
+            decision = request.decisions.get(field.field_name, field.redaction_decision)
+            if decision not in valid_decisions:
+                decision = "redact"
             if field.always_redact:
                 decision = "redact"
             field.redaction_decision = decision
+            resolved_decisions[field.field_name] = decision
 
         # Necessity results
         context = row["declared_context"]
@@ -347,7 +368,7 @@ async def redact_document(request: RedactRequest):
         necessity_results = {f.field_name: check_necessity(doc_type, f.field_name, context) for f in fields}
 
         # PEI after
-        pei_after = compute_pei_after_redaction(fields, necessity_results, request.decisions)
+        pei_after = compute_pei_after_redaction(fields, necessity_results, resolved_decisions)
 
         # Redact image
         redact_dir = REDACTED_DIR / request.scan_id
@@ -360,7 +381,7 @@ async def redact_document(request: RedactRequest):
         else:
             redaction_source = Path(row["original_file_path"])
 
-        redact_image(redaction_source, fields, redacted_path, request.decisions)
+        redact_image(redaction_source, fields, redacted_path, resolved_decisions)
 
         # Generate audit report
         audit = generate_audit_report(

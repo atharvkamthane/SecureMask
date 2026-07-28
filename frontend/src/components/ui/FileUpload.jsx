@@ -2,7 +2,7 @@ import { useCallback, useState, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { Upload } from 'lucide-react'
 
-export default function FileUpload({ onFile, accept = '.jpg,.jpeg,.png,.pdf' }) {
+export default function FileUpload({ onFile, accept = '.jpg,.jpeg,.png' }) {
   const [dragging, setDragging] = useState(false)
   const [fileName, setFileName] = useState(null)
   const inputRef = useRef()
@@ -35,7 +35,7 @@ export default function FileUpload({ onFile, accept = '.jpg,.jpeg,.png,.pdf' }) 
       <p className="text-text-2 text-sm text-center">
         {fileName ? <span className="text-text-1">{fileName}</span> : 'drop your document here'}
       </p>
-      <p className="text-text-3 text-xs">supports jpg, png, pdf, screenshot</p>
+      <p className="text-text-3 text-xs">supports jpg, png, screenshot</p>
     </motion.div>
   )
 }

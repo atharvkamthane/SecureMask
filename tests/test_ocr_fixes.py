@@ -58,6 +58,41 @@ class OcrFixesTest(unittest.TestCase):
             self.assertEqual(parsed.image_width, 160)
             self.assertEqual(parsed.image_height, 80)
 
+    def test_parse_paddle_result_uses_spatial_reading_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "sample.png"
+            cv2.imwrite(str(image_path), np.full((80, 160, 3), 255, dtype=np.uint8))
+            parsed = self.ocr._parse_paddle_result([{
+                "rec_texts": ["second", "first"],
+                "rec_scores": [0.9, 0.9],
+                "dt_polys": [
+                    [(80, 5), (120, 5), (120, 20), (80, 20)],
+                    [(5, 5), (45, 5), (45, 20), (5, 20)],
+                ],
+            }], str(image_path))
+            self.assertIsNotNone(parsed)
+            self.assertEqual(parsed.full_text, "first second")
+
+    def test_low_confidence_easyocr_does_not_block_paddle_fallback(self):
+        engine = self.ocr.OCREngine()
+        easy = self.ocr.OCRResult(
+            full_text="garbled words here",
+            words=[self.ocr.OCRWord("x", 0.2, self.ocr.BoundingBox(0, 0, 2, 2))] * 3,
+            image_width=10,
+            image_height=10,
+        )
+        paddle = self.ocr.OCRResult(
+            full_text="Aadhaar 1234",
+            words=[self.ocr.OCRWord("Aadhaar", 0.9, self.ocr.BoundingBox(0, 0, 2, 2))],
+            image_width=10,
+            image_height=10,
+        )
+        with mock.patch.object(self.ocr, "_easyocr_fallback", return_value=easy), \
+             mock.patch.object(self.ocr, "_paddle_ocr", return_value=paddle) as paddle_call:
+            result = engine.extract("unused.png")
+        paddle_call.assert_called_once_with("unused.png")
+        self.assertEqual(result.full_text, "Aadhaar 1234")
+
     def test_engine_routes_color_image_to_easyocr(self):
         engine = self.ocr.OCREngine()
 

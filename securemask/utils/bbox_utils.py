@@ -112,23 +112,33 @@ def find_date_digits_bbox(date_value: str, words: list[OCRWord]) -> BoundingBox 
         return find_bbox_in_words(date_value, words, max_window=4)
 
     parts = [m.group(1), m.group(2), m.group(3)]
+    # Short date components such as "01" must not be fuzzy-matched against
+    # unrelated digits elsewhere on a document, which creates oversized boxes.
     hits: list[OCRWord] = []
+    used_indices: set[int] = set()
     for part in parts:
         part_digits = re.sub(r"\D", "", part)
         if not part_digits:
             continue
-        best_w: OCRWord | None = None
-        best_score = 0.0
-        for w in words:
-            w_digits = re.sub(r"\D", "", w.text)
-            if not w_digits:
+        best_idx: int | None = None
+        best_distance = float("inf")
+        for index, w in enumerate(words):
+            if index in used_indices:
                 continue
-            score = fuzz.ratio(w_digits, part_digits)
-            if score >= 75 and score > best_score:
-                best_score = score
-                best_w = w
-        if best_w:
-            hits.append(best_w)
+            w_digits = re.sub(r"\D", "", w.text)
+            if w_digits != part_digits:
+                continue
+            distance = 0.0
+            if hits:
+                previous = hits[-1]
+                distance = abs((w.bbox.y + w.bbox.height / 2) - (previous.bbox.y + previous.bbox.height / 2)) * 10
+                distance += max(0, previous.bbox.x - w.bbox.x)
+            if distance < best_distance:
+                best_distance = distance
+                best_idx = index
+        if best_idx is not None:
+            hits.append(words[best_idx])
+            used_indices.add(best_idx)
 
     if len(hits) < 2:
         return find_bbox_in_words("/".join(parts), words, max_window=4)
