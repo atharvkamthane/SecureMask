@@ -14,3 +14,4 @@ faker>=22.6.0  # Only needed for ML training data generation
 numpy>=1.26.4
 spacy>=3.7.0
 easyocr>=1.7.2
+scipy>=1.10.0

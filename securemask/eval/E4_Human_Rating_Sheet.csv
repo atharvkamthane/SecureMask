@@ -1,0 +1,37 @@
+Rater_ID,Scenario_ID,Perceived_Privacy_Risk_Score_1_to_10,Comments
+Rater1,Scenario 1,9.0,Full Aadhaar exposed
+Rater1,Scenario 2,2.0,Only DOB shown
+Rater1,Scenario 3,8.5,Full PAN exposed
+Rater1,Scenario 4,3.0,Name and PAN only
+Rater1,Scenario 5,8.0,Full DL exposed
+Rater1,Scenario 6,2.5,Name and Address only
+Rater1,Scenario 7,9.5,Full Passport exposed
+Rater1,Scenario 8,4.0,Passport masked
+Rater1,Scenario 9,9.5,Full Voter ID on public portal
+Rater1,Scenario 10,2.0,Only Name exposed
+Rater1,Scenario 11,9.0,Aadhaar for address proof
+Rater1,Scenario 12,2.0,Only Address exposed
+Rater2,Scenario 1,9.5,High exposure
+Rater2,Scenario 2,2.5,Low exposure
+Rater2,Scenario 3,9.0,High exposure
+Rater2,Scenario 4,3.5,Moderate exposure
+Rater2,Scenario 5,8.5,High exposure
+Rater2,Scenario 6,3.0,Low exposure
+Rater2,Scenario 7,9.5,High exposure
+Rater2,Scenario 8,4.5,Moderate exposure
+Rater2,Scenario 9,10.0,Critical exposure
+Rater2,Scenario 10,1.5,Low exposure
+Rater2,Scenario 11,9.0,High exposure
+Rater2,Scenario 12,2.0,Low exposure
+Rater3,Scenario 1,9.0,High exposure
+Rater3,Scenario 2,1.8,Low exposure
+Rater3,Scenario 3,9.0,High exposure
+Rater3,Scenario 4,3.5,Moderate exposure
+Rater3,Scenario 5,9.0,High exposure
+Rater3,Scenario 6,2.8,Low exposure
+Rater3,Scenario 7,9.5,High exposure
+Rater3,Scenario 8,4.0,Moderate exposure
+Rater3,Scenario 9,10.0,Critical exposure
+Rater3,Scenario 10,2.0,Low exposure
+Rater3,Scenario 11,9.0,High exposure
+Rater3,Scenario 12,2.0,Low exposure
