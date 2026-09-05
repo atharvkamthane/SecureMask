@@ -1,4 +1,4 @@
-"""OCR engine: PaddleOCR primary → EasyOCR fallback.
+"""OCR engine: EasyOCR primary → PaddleOCR fallback.
 
 Root-cause fixes vs previous version:
   - PaddleOCR 3.x (PaddleX backend) returns dict-style result objects.
@@ -348,7 +348,7 @@ def _paddle_ocr(image_path: str, force_hindi: bool = False) -> OCRResult | None:
 
 
 # ------------------------------------------------------------------
-# EasyOCR — fallback engine (pre-warmed at import)
+# EasyOCR — primary engine (pre-warmed at import)
 # ------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
@@ -505,7 +505,10 @@ if os.getenv(SKIP_EASYOCR_PREWARM_ENV) != "1":
 
 
 class OCREngine:
-    """PaddleOCR (primary) → EasyOCR (fallback).
+    """EasyOCR (primary) → PaddleOCR (fallback).
+
+    EasyOCR is tried first; if it returns too few words or low average
+    confidence, PaddleOCR is used as the fallback engine.
 
     Image routing — CRITICAL for PaddleOCR 3.x:
       PaddleOCR receives the COLOR image (save_preprocessed_variants()['color']).
@@ -527,7 +530,7 @@ class OCREngine:
         # Both engines get the COLOR image — see class docstring for why
         color_path = str(preprocessed_color_path) if preprocessed_color_path else raw_path
 
-        # ---- 1. EasyOCR ----
+        # ---- 1. EasyOCR (primary) ----
         easy_result = _easyocr_fallback(color_path)
         easy_ok = (
             easy_result is not None
@@ -542,7 +545,7 @@ class OCREngine:
             )
             return self._finalize(easy_result)
 
-        # ---- 2. PaddleOCR (fallback when EasyOCR fails) ----
+        # ---- 2. PaddleOCR (fallback when EasyOCR is insufficient) ----
         paddle_result = _paddle_ocr(color_path)
 
         low_conf  = easy_result.avg_confidence if easy_result else 0.0

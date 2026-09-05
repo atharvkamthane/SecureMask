@@ -30,8 +30,8 @@ Before text is read, the image must be normalized to counter bad lighting, shado
 
 ### 3. OCR Text Extraction (Dual-Language Pipeline)
 Extracts raw text and word-level coordinate bounding boxes (`[x, y, width, height]`). A dual-language strategy ensures both English and Devanagari text are captured:
-- **PaddleOCR English + Hindi (Primary)**: Both English (PP-OCRv5) and Hindi PaddleOCR models run in parallel on every document. Non-overlapping Hindi words are merged into the English result, ensuring Devanagari names and labels are always captured alongside Latin text.
-- **EasyOCR (Fallback)**: Used when PaddleOCR produces insufficient words (below the minimum threshold). Supports English + Hindi with phrase-level token splitting for accurate word bounding boxes.
+- **EasyOCR English + Hindi (Primary)**: Supports English + Hindi with phrase-level token splitting for accurate word bounding boxes. Used as the first-choice engine on every document.
+- **PaddleOCR English + Hindi (Fallback)**: Both English (PP-OCRv5) and Hindi PaddleOCR models run in parallel when EasyOCR produces insufficient words or low confidence. Non-overlapping Hindi words are merged into the English result, ensuring Devanagari names and labels are always captured alongside Latin text.
 
 ### 4. Machine Learning Document Classification
 Once text is read, SecureMask determines *what* the document is:
@@ -71,7 +71,7 @@ Generates a new, anonymized file payload:
 
 ### Backend
 - **Framework:** Python 3.10+, FastAPI, Uvicorn
-- **OCR:** PaddleOCR (primary), EasyOCR (fallback)
+- **OCR:** EasyOCR (primary), PaddleOCR (fallback)
 - **ML/Classification:** PyTorch (MobileNetV2 fine-tuned), torchvision
 - **NLP/NER:** HuggingFace Transformers (ai4bharat/IndicNER), spaCy (`en_core_web_sm`)
 - **Image Processing:** OpenCV (preprocessing, face detection), Pillow (redaction), pyzbar (QR)
@@ -229,7 +229,7 @@ SecureMask/
 │   ├── api/
 │   │   └── routes.py            # REST endpoints + Pydantic response models
 │   ├── core/
-│   │   ├── ocr.py               # Dual EN+HI PaddleOCR → EasyOCR fallback
+│   │   ├── ocr.py               # Dual EN+HI EasyOCR (primary) → PaddleOCR fallback
 │   │   ├── classifier.py        # MobileNetV2 CNN + keyword fallback
 │   │   ├── extractor.py         # Multi-engine field extraction + Devanagari name scan
 │   │   ├── fuzzy_regex.py       # Regex + rapidfuzz sliding-window matcher

@@ -162,7 +162,7 @@ def save_preprocessed_variants(
     Keys:
       'color'         — deskewed JPEG, best for PaddleOCR 3.x and EasyOCR
       'enhanced_gray' — sharpened grayscale PNG, kept for legacy / archival
-      'binary'        — adaptive-threshold PNG for EasyOCR fallback / archival
+      'binary'        — adaptive-threshold PNG for archival
 
     ALWAYS pass 'color' to PaddleOCR 3.x — its sub-models need color input.
     """
