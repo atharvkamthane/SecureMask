@@ -1,8 +1,8 @@
 """E4: Calculate Privacy Exposure Index (PEI) scores for the 12 evaluation scenarios.
 
 Calls into existing securemask.core.necessity (check_necessity) and
-securemask.core.pei (compute_pei, compute_pei_after_redaction) using real
-DetectedField schema definitions.
+securemask.core.pei (compute_pei_details, compute_pei, compute_pei_after_redaction)
+using real DetectedField schema definitions.
 
 Output:
   securemask/eval/e4_pei_scores.json: list of 12 {scenario_id, pei_score} entries.
@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from securemask.core.necessity import check_necessity
-from securemask.core.pei import compute_pei, compute_pei_after_redaction
+from securemask.core.pei import (
+    DEFAULT_RESIDUAL_LAMBDA,
+    compute_pei_details,
+)
 from securemask.models.detected_field import BoundingBox, DetectedField
 from securemask.schemas import get_schema
 
@@ -136,8 +139,10 @@ SCENARIOS: list[dict[str, Any]] = [
 ]
 
 
-def run_e4_pei_calculation() -> list[dict[str, Any]]:
-    """Compute real PEI scores for the 12 scenarios."""
+def run_e4_pei_calculation(
+    lambda_param: float = DEFAULT_RESIDUAL_LAMBDA,
+) -> list[dict[str, Any]]:
+    """Compute real PEI scores and explainability details for the 12 scenarios."""
     results: list[dict[str, Any]] = []
 
     for sc in SCENARIOS:
@@ -167,10 +172,10 @@ def run_e4_pei_calculation() -> list[dict[str, Any]]:
 
         if sc["is_unredacted_upload"]:
             # Original unredacted upload: all fields on document are exposed
-            pei_score = compute_pei(detected_fields, necessity_results)
+            decisions = None
         else:
             # Post-redaction state: compute PEI based on decisions
-            decisions: dict[str, str] = {}
+            decisions = {}
             for f in detected_fields:
                 if f.field_name in sc["unredacted_fields"]:
                     decisions[f.field_name] = "allow"
@@ -179,16 +184,20 @@ def run_e4_pei_calculation() -> list[dict[str, Any]]:
                 else:
                     decisions[f.field_name] = "redact"
 
-            pei_score = compute_pei_after_redaction(
-                detected_fields, necessity_results, decisions
-            )
+        details = compute_pei_details(
+            detected_fields=detected_fields,
+            necessity_results=necessity_results,
+            redaction_decisions=decisions,
+            lambda_param=lambda_param,
+        )
 
         results.append({
             "scenario_id": sc["scenario_id"],
             "title": sc["title"],
             "document_type": doc_type,
             "declared_context": context,
-            "pei_score": pei_score,
+            "pei_score": details.pei,
+            "details": details,
         })
 
     return results
@@ -200,7 +209,7 @@ def main() -> None:
     eval_dir = Path(__file__).resolve().parent
     out_json = eval_dir / "e4_pei_scores.json"
 
-    # Simplified list of {scenario_id, pei_score} as required
+    # Simplified list of {scenario_id, pei_score} matching evaluation harness spec
     simplified_output = [
         {"scenario_id": r["scenario_id"], "pei_score": r["pei_score"]}
         for r in results
@@ -211,11 +220,14 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    print(f"Computed PEI scores for 12 scenarios:")
-    print("-" * 50)
+    print(f"Computed PEI scores for 12 scenarios (lambda={DEFAULT_RESIDUAL_LAMBDA}):")
+    print("=" * 80)
+    print(f"{'Scenario ID':<14} {'Title':<50} {'PEI':>6} {'Excess%':>9} {'Resid%':>8}")
+    print("-" * 80)
     for r in results:
-        print(f"{r['scenario_id']:<14} {r['title']:<55} PEI: {r['pei_score']:>5.1f}")
-    print("-" * 50)
+        d = r["details"]
+        print(f"{r['scenario_id']:<14} {r['title']:<50} {d.pei:>6.1f} {d.pei_excess:>9.1f} {d.pei_residual:>8.1f}")
+    print("=" * 80)
     print(f"Saved: {out_json}")
 
 
