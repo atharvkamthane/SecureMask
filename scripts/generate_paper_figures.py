@@ -15,7 +15,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
+
+# Add repository root to sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -143,18 +149,18 @@ def generate_fig2_e4_correlation(out_dir: Path) -> Path:
     """Generate PEI vs Human Risk Perception correlation plot (N=3 real raters)."""
     # Ground truth data from real N=3 human rating sheet and compute_pei_details
     scenarios = [
-        ("S1: Aadhaar Age (Full)", 81.8, 86.7),
-        ("S2: Aadhaar Age (Masked)", 0.0, 10.0),
-        ("S3: PAN Identity (Full)", 70.0, 73.3),
-        ("S4: PAN Identity (Masked)", 11.7, 23.3),
-        ("S5: DL Address (Full)", 75.0, 80.0),
-        ("S6: DL Address (Masked)", 0.0, 13.3),
-        ("S7: Passport KYC (Full)", 84.4, 86.7),
-        ("S8: Passport KYC (Masked)", 8.9, 20.0),
-        ("S9: Voter ID (Full)", 82.6, 80.0),
-        ("S10: Voter ID (Masked)", 6.5, 16.7),
-        ("S11: Aadhaar Hotel (Masked)", 9.1, 26.7),
-        ("S12: Aadhaar SIM (Masked)", 9.1, 23.3),
+        ("S1: Aadhaar Age (Full)", 71.9, 91.7),
+        ("S2: Aadhaar Age (Masked)", 0.0, 21.0),
+        ("S3: PAN Identity (Full)", 54.8, 88.3),
+        ("S4: PAN Identity (Masked)", 11.9, 33.3),
+        ("S5: DL Address (Full)", 61.4, 85.0),
+        ("S6: DL Address (Masked)", 0.0, 27.7),
+        ("S7: Passport KYC (Full)", 54.2, 95.0),
+        ("S8: Passport KYC (Masked)", 5.2, 41.7),
+        ("S9: Voter ID (Full)", 77.3, 98.3),
+        ("S10: Voter ID (Masked)", 0.0, 18.3),
+        ("S11: Aadhaar Address (Full)", 73.4, 90.0),
+        ("S12: Aadhaar Address (Masked)", 0.0, 20.0),
     ]
 
     pei = np.array([s[1] for s in scenarios])
@@ -229,14 +235,31 @@ def generate_fig2_e4_correlation(out_dir: Path) -> Path:
 
 
 def generate_fig3_lambda_sensitivity(out_dir: Path) -> Path:
-    """Generate lambda parameter sensitivity curves."""
+    """Generate lambda parameter sensitivity curves using exact calculations."""
+    from securemask.eval.calculate_e4_correlation import load_human_ratings
+    from securemask.eval.run_e4_pei_scores import run_e4_pei_calculation
+
+    csv_path = Path(__file__).resolve().parent.parent / "securemask" / "eval" / "E4_Human_Rating_Sheet.csv"
+    human_means = load_human_ratings(csv_path)
+    scenario_order = [f"Scenario {i}" for i in range(1, 13)]
+    human_vec = [human_means[sc] for sc in scenario_order]
+
     lambdas = np.linspace(0.0, 1.0, 21)
-    
-    # Pre-calculated correlation and margin curves across lambda
-    # Correlation remains strong (0.95-0.98) across lambda; tier separation peaks at 0.50
-    r_vals = [0.955 + 0.02 * np.sin(l * np.pi) for l in lambdas]
-    rho_vals = [0.880 + 0.015 * (1 - (l - 0.5)**2) for l in lambdas]
-    tier_margin = [65.0 - 15.0 * l for l in lambdas]  # Margin between unredacted and masked tiers
+    r_vals = []
+    rho_vals = []
+    tier_margins = []
+
+    for l in lambdas:
+        pei_results = run_e4_pei_calculation(lambda_param=float(l))
+        pei_dict = {r["scenario_id"]: r["pei_score"] for r in pei_results}
+        pei_vec = [pei_dict[sc] for sc in scenario_order]
+        r, _ = stats.pearsonr(human_vec, pei_vec)
+        rho, _ = stats.spearmanr(human_vec, pei_vec)
+        r_vals.append(r)
+        rho_vals.append(rho)
+        unredacted = [pei_dict[f"Scenario {i}"] for i in [1, 3, 5, 7, 9, 11]]
+        redacted = [pei_dict[f"Scenario {i}"] for i in [2, 4, 6, 8, 10, 12]]
+        tier_margins.append(np.mean(unredacted) - np.mean(redacted))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5), dpi=300)
 
@@ -251,13 +274,13 @@ def generate_fig3_lambda_sensitivity(out_dir: Path) -> Path:
     ax1.legend(loc="lower left")
 
     # Right: Tier Separation Margin
-    ax2.plot(lambdas, tier_margin, "d-", color="#E65100", lw=2, ms=4, label="Mean Tier Gap (Points)")
+    ax2.plot(lambdas, tier_margins, "d-", color="#E65100", lw=2, ms=4, label="Mean Tier Gap (Points)")
     ax2.axvline(0.50, color="#C62828", ls=":", lw=1.8, label=r"Calibrated $\lambda = 0.50$")
     ax2.fill_between([0.35, 0.65], [0, 0], [70, 70], color="#FFF3E0", alpha=0.5, label="Optimal Policy Range")
     ax2.set_xlabel(r"Residual Exposure Policy Parameter $\lambda$")
     ax2.set_ylabel("Tier Separation Margin (PEI Points)")
     ax2.set_title("B. Risk Tier Discriminability Margin", fontweight="bold")
-    ax2.set_ylim(45, 70)
+    ax2.set_ylim(45, 75)
     ax2.legend(loc="upper right")
 
     fig.tight_layout()

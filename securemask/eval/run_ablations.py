@@ -187,15 +187,13 @@ def evaluate_scenario_ablation(
 
     if ablation_name == "Full_SecureMask":
         for f in detected_fields:
-            n_status = nec_gt[f.field_name]
-            if n_status == "necessary":
+            is_req = nec_gt[f.field_name]
+            if is_req:
                 # Primary identifiers masked if partial allowed, else allow
                 if f.field_name in PRIMARY_IDENTIFIERS:
                     decisions[f.field_name] = "mask"
                 else:
                     decisions[f.field_name] = "allow"
-            elif n_status == "optional":
-                decisions[f.field_name] = "mask" if f.field_name in PRIMARY_IDENTIFIERS else "allow"
             else:
                 decisions[f.field_name] = "redact"
 
@@ -210,8 +208,8 @@ def evaluate_scenario_ablation(
     elif ablation_name == "Ablation_B_Unweighted_Exposure":
         # Decisions same as SecureMask, but exposure index uses uniform weights (1.0) without lambda
         for f in detected_fields:
-            n_status = nec_gt[f.field_name]
-            if n_status == "necessary":
+            is_req = nec_gt[f.field_name]
+            if is_req:
                 decisions[f.field_name] = "mask" if f.field_name in PRIMARY_IDENTIFIERS else "allow"
             else:
                 decisions[f.field_name] = "redact"
@@ -219,15 +217,15 @@ def evaluate_scenario_ablation(
     elif ablation_name == "Ablation_E_Binary_Redaction":
         # No masking: any necessary identifier is fully allowed, excess is fully redacted
         for f in detected_fields:
-            n_status = nec_gt[f.field_name]
-            if n_status in ("necessary", "optional"):
+            is_req = nec_gt[f.field_name]
+            if is_req:
                 decisions[f.field_name] = "allow"
             else:
                 decisions[f.field_name] = "redact"
     else:
         # Default full SecureMask logic
         for f in detected_fields:
-            decisions[f.field_name] = "redact" if nec_gt[f.field_name] == "redundant" else "allow"
+            decisions[f.field_name] = "allow" if nec_gt[f.field_name] else "redact"
 
     # Pre-redaction exposure (all fields exposed)
     pre_decisions = {f.field_name: "allow" for f in detected_fields}
@@ -241,13 +239,13 @@ def evaluate_scenario_ablation(
         pei_before = (pre_exposed / total_fields) * 100.0
         pei_after = (post_exposed / total_fields) * 100.0
     else:
-        nec_bools = {k: (v in ("necessary", "optional")) for k, v in nec_gt.items()}
+        nec_bools = nec_gt
         pei_before = compute_pei(detected_fields, nec_bools, pre_decisions)
         pei_after = compute_pei(detected_fields, nec_bools, decisions)
 
     # Utility and Error Metrics
-    necessary_fields = [f.field_name for f in detected_fields if nec_gt[f.field_name] == "necessary"]
-    excess_fields = [f.field_name for f in detected_fields if nec_gt[f.field_name] == "redundant"]
+    necessary_fields = [f.field_name for f in detected_fields if nec_gt[f.field_name]]
+    excess_fields = [f.field_name for f in detected_fields if not nec_gt[f.field_name]]
 
     # Utility retention: fraction of necessary fields that are NOT redacted
     if necessary_fields:

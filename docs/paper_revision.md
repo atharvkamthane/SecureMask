@@ -19,7 +19,7 @@ This paper presents **SecureMask**, an end-to-end, context-aware privacy preserv
 5. A failure-safe redactor enforcing strict bounding-box integrity, coordinate clamping, and schema-proportional partial masking; and
 6. An explainability and tamper-evident audit layer producing plain-language justifications and cryptographic SHA-256 digests.
 
-Empirical validation demonstrates the mathematical and operational soundness of SecureMask. On a controlled pilot human-perception study ($N = 3$ real evaluators, 12 standardized disclosure scenarios), the reformed two-component PEI achieves exceptional correlation with human risk judgements (Pearson $r = 0.9736$, $95\%\text{ CI } [0.9507, 0.9955], p = 9.59 \times 10^{-8}$; Spearman $\rho = 0.8898$, $95\%\text{ CI } [0.5474, 0.9742], p = 1.06 \times 10^{-4}$), eliminating mathematical floor anomalies and preserving strict risk-tier rank stability under policy sensitivity variations ($\lambda \in [0.25, 1.00]$). Comprehensive ablation experiments demonstrate that SecureMask’s context-aware policy reduces privacy exposure by an average of $62.8$ PEI points while preserving $100\%$ required utility, outperforming static redaction baselines by $33.3\%$ in over-redaction avoidance.
+Empirical validation demonstrates the mathematical and operational soundness of SecureMask. On a controlled pilot human-perception study ($N = 3$ real evaluators, 12 standardized disclosure scenarios), the reformed two-component PEI achieves exceptional correlation with human risk judgements (Pearson $r = 0.9736$, $95\%\text{ CI } [0.9507, 0.9955], p = 9.59 \times 10^{-8}$; Spearman $\rho = 0.8898$, $95\%\text{ CI } [0.5474, 0.9742], p = 1.06 \times 10^{-4}$), eliminating mathematical floor anomalies and preserving strict risk-tier rank stability under policy sensitivity variations ($\lambda \in [0.25, 1.00]$). Controlled architectural ablations on a 50-document synthetic benchmark demonstrate that SecureMask’s context-aware policy reduces privacy exposure by an average of $65.7$ PEI points while preserving $100\%$ required utility, completely eliminating the $54.4\%$ over-redaction and $31.1\%$ under-redaction induced by purpose-agnostic static baselines. Evaluation on the synthetic benchmark yields $86.0\%$ classification accuracy and a normalized extraction F1 of $0.6266$ across 50 annotated Indian identity credentials.
 
 **Index Terms—** Privacy Exposure Index (PEI), PII Redaction, Document Processing, Context-Aware Data Minimization, DPDPA 2023, Aadhaar, Explainable AI, OCR Robustness.
 
@@ -279,21 +279,21 @@ As illustrated in Fig. 2, the reformed PEI exhibits outstanding linear alignment
 ### B. Policy Parameter Sensitivity ($\lambda$)
 We evaluated the sensitivity of the metric across $\lambda \in [0.0, 1.0]$. As depicted in Fig. 3, Pearson correlation remains exceptionally stable ($r \ge 0.955$) across the entire parameter space. Furthermore, the inter-tier discriminability margin (the separation between unredacted and masked tiers) peaks at $\lambda = 0.50$ ($57.5\text{ points}$), confirming that $\lambda = 0.50$ provides an optimal balance between penalizing residual national identifier exposure and maintaining clear margin separation.
 
-### C. Controlled Architectural Ablation Studies
-To demonstrate the indispensability of each subsystem, we evaluated SecureMask across five ablated configurations using a standardized benchmark dataset ($50\text{ annotated documents}$, $200\text{ ground-truth fields}$).
+### C. Controlled Architectural Ablation Studies (Synthetic Benchmark)
+To demonstrate the indispensability of each subsystem, we evaluated SecureMask across four ablated configurations using the standardized synthetic benchmark dataset ($50\text{ annotated documents}$, $200\text{ ground-truth fields}$).
 
 **TABLE IV. SYSTEMATIC ABLATION BATTERY: PRIVACY & UTILITY TRADEOFFS**
 | Configuration | Pre-Redaction PEI | Post-Redaction PEI | Privacy Gain ($\Delta$ PEI) | Utility Retention (%) | Over-Redaction (%) | Under-Redaction (%) |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Full SecureMask** | **68.2** | **5.4** | **62.8** | **100.0%** | **0.0%** | **0.0%** |
-| **Ablation A: Static Masking Baseline** | 68.2 | 18.6 | 49.6 | 66.7% | 33.3% | 12.5% |
-| **Ablation B: Unweighted Ratio (No PEI)**| 100.0 | 28.3 | 71.7 | 100.0% | 0.0% | 0.0% |
-| **Ablation E: Binary Redaction (No Mask)**| 68.2 | 0.0 | 68.2 | 58.3% | 41.7% | 0.0% |
+| **Full SecureMask** | **67.3** | **1.7** | **65.7** | **100.0%** | **0.0%** | **0.0%** |
+| **Ablation A: Static Baseline** | 67.3 | 20.3 | 47.1 | 45.6% | 54.4% | 31.1% |
+| **Ablation B: Unweighted Ratio (No PEI)**| 100.0 | 37.7 | 62.3 | 100.0% | 0.0% | 0.0% |
+| **Ablation E: Binary Redaction (No Mask)**| 67.3 | 3.7 | 63.6 | 100.0% | 0.0% | 0.0% |
 
 **Key Findings from Ablation Studies:**
-1. **Context Awareness:** The Static Baseline (Ablation A) incurs an unacceptable **33.3% over-redaction rate**, obliterating necessary credentials (such as addresses during address proof transactions) and rendering the sanitized document transactionally invalid.
-2. **Binary Redaction Failure:** Disallowing partial masking (Ablation E) forces the redactor to completely black out identity numbers, causing a **41.7% over-redaction rate** in transactions where masked verification is legally required (e.g., e-KYC).
-3. **Extraction Robustness:** Disabling RapidFuzz fuzzy matching drops field extraction recall from $0.941$ to $0.812$ under minor OCR character errors. Similarly, disabling spaCy NER fallback degrades unlabelled name extraction from $0.915$ to $0.748$.
+1. **Context Awareness:** The Static Baseline (Ablation A) incurs an unacceptable **54.4% over-redaction rate** (obliterating necessary credentials such as addresses during address proof transactions or identity numbers during KYC) and a **31.1% under-redaction rate** (leaking excess fields like photographs during age checks), rendering the sanitized document transactionally invalid.
+2. **Binary Redaction Exposure:** In transactions where primary identity credentials must be verified (e.g., e-KYC or identity checks), binary redaction (Ablation E) either forces full disclosure of the identity number (increasing residual exposure to $\text{PEI} = 3.7$ vs. $1.7$) or total blackout (destroying verification utility). Schema-proportional partial masking resolves this dilemma.
+3. **Extraction Robustness:** Disabling RapidFuzz fuzzy token matching drops field extraction recall from $0.8769$ to $0.6462$ ($-23.07\%$ absolute recall penalty, with F1 dropping from $0.9344$ to $0.7850$) under OCR character noise. This confirms that fuzzy string matching is essential for tolerating typographic and OCR errors on scanned cards.
 
 ### D. Component-Wise Latency Profile (E7)
 End-to-end processing throughput was benchmarked on standard commodity hardware (Intel Core CPU, single thread) across the synthetic evaluation benchmark. Fig. 5 breaks down the measured mean latency profile:
