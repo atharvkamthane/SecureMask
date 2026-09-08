@@ -169,7 +169,7 @@ def run_robustness_eval(
     print(f"\n{'='*70}")
     print(f"E6 Robustness Results  (n={len(test_set)})")
     print(f"{'='*70}")
-    print(f"{'Degradation':<24} {'CleanAcc':>10} {'DegAcc':>10} {'ΔAcc':>10} {'CleanF1':>10} {'DegF1':>10} {'ΔF1':>10}")
+    print(f"{'Degradation':<24} {'CleanAcc':>10} {'DegAcc':>10} {'dAcc':>10} {'CleanF1':>10} {'DegF1':>10} {'dF1':>10}")
     print("-" * 84)
     for name, dr in degradation_results.items():
         deg = dr["degraded"]

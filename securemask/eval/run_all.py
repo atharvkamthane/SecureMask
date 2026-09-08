@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None) -> None:
             writer.writerow(row)
     print(f"Saved: {csv_path}")
 
-    print(f"\n✓ Full evaluation suite complete. Results in {output_dir}/")
+    print(f"\n[SUCCESS] Full evaluation suite complete. Results in {output_dir}/")
 
 
 if __name__ == "__main__":

@@ -108,7 +108,25 @@ def compute_pei_details(
     Returns:
         PEIDetails with components and final PEI score.
     """
-    if not detected_fields:
+    # Clamp lambda parameter to non-negative range
+    lambda_param = max(0.0, float(lambda_param))
+
+    # Defensive deduplication by field_name: retain highest-weight/confidence entry
+    seen_fields: dict[str, DetectedField] = {}
+    for f in detected_fields:
+        if not hasattr(f, "field_name") or not f.field_name:
+            continue
+        fname = str(f.field_name)
+        if fname not in seen_fields:
+            seen_fields[fname] = f
+        else:
+            # If duplicate exists, preserve the one with higher weight/confidence
+            curr = seen_fields[fname]
+            if (f.sensitivity_weight, getattr(f, "confidence", 0.0)) > (curr.sensitivity_weight, getattr(curr, "confidence", 0.0)):
+                seen_fields[fname] = f
+
+    sanitized_fields = list(seen_fields.values())
+    if not sanitized_fields:
         return PEIDetails(
             pei=0.0,
             raw_excess=0.0,
@@ -119,7 +137,7 @@ def compute_pei_details(
             lambda_param=lambda_param,
         )
 
-    total_capacity = sum(float(field.sensitivity_weight) for field in detected_fields)
+    total_capacity = sum(max(0.0, float(field.sensitivity_weight)) for field in sanitized_fields)
     if total_capacity <= 0.0:
         return PEIDetails(
             pei=0.0,
@@ -134,24 +152,26 @@ def compute_pei_details(
     raw_excess = 0.0
     raw_residual = 0.0
 
-    for field in detected_fields:
-        w_f = float(field.sensitivity_weight)
+    for field in sanitized_fields:
+        w_f = max(0.0, float(field.sensitivity_weight))
 
         # Determine decision exposure factor e_f
         if redaction_decisions is None:
             decision = "allow"
         else:
-            decision = redaction_decisions.get(field.field_name, "allow")
+            raw_decision = redaction_decisions.get(field.field_name, "allow")
+            decision = str(raw_decision).lower().strip() if raw_decision else "allow"
 
         if decision == "redact":
             e_f = 0.0
         elif decision == "mask":
             e_f = get_masking_exposure_factor(field.field_name)
         else:
+            # "allow" or unrecognized decision defaults conservatively to full exposure (1.0)
             e_f = 1.0
 
-        is_necessary = necessity_results.get(field.field_name, False)
-        is_excess = field.always_redact or (not is_necessary)
+        is_necessary = bool(necessity_results.get(field.field_name, False))
+        is_excess = bool(getattr(field, "always_redact", False)) or (not is_necessary)
 
         if is_excess:
             raw_excess += e_f * w_f

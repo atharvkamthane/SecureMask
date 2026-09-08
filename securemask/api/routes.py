@@ -10,6 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from PIL import Image, UnidentifiedImageError
+import time
+
+# Security hardening: Prevent decompression bombs
+Image.MAX_IMAGE_PIXELS = 50_000_000
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 from pydantic import BaseModel
@@ -23,9 +27,9 @@ from securemask.core.explainer import generate_explanation
 from securemask.core.extractor import FieldExtractor
 from securemask.core.necessity import check_necessity
 from securemask.core.ocr import OCREngine
-from securemask.core.pei import compute_pei, compute_pei_after_redaction
+from securemask.core.pei import compute_pei, compute_pei_after_redaction, compute_pei_details
 from securemask.core.recommendations import recommend_action, summarize_recommendations
-from securemask.core.redactor import redact_image
+from securemask.core.redactor import Redactor, redact_image
 from securemask.db.database import get_connection
 from securemask.demo import is_demo_image, get_demo_fields, DEMO_RAW_TEXT
 from securemask.models.detected_field import BoundingBox, DetectedField
@@ -167,11 +171,10 @@ async def upload_document(file: UploadFile = File(...),
     if len(content) > MAX_UPLOAD_SIZE:
         raise HTTPException(413, "File too large. Maximum size is 20 MB.")
 
-    safe_filename = PurePosixPath(file.filename).name or "upload"
-    # The OCR and redaction pipelines operate on raster images. Accepting PDFs
-    # here previously caused an unhandled Pillow/OpenCV failure later on.
+    raw_name = Path(file.filename or "upload").name
+    safe_filename = "".join(c for c in raw_name if c.isalnum() or c in "._-") or "upload.png"
     ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
-    file_ext = PurePosixPath(safe_filename).suffix.lower()
+    file_ext = Path(safe_filename).suffix.lower()
     if file_ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"Unsupported file type '{file_ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
 
@@ -367,28 +370,46 @@ async def redact_document(request: RedactRequest):
         doc_type = row["document_type"]
         necessity_results = {f.field_name: check_necessity(doc_type, f.field_name, context) for f in fields}
 
-        # PEI after
-        pei_after = compute_pei_after_redaction(fields, necessity_results, resolved_decisions)
+        # Detailed PEI breakdown
+        details_before = compute_pei_details(fields, necessity_results)
+        details_after = compute_pei_details(fields, necessity_results, resolved_decisions)
+        pei_after = details_after.pei
 
-        # Redact image
+        # Redact image with failure-safe tracking
         redact_dir = REDACTED_DIR / request.scan_id
         redact_dir.mkdir(parents=True, exist_ok=True)
         redacted_path = redact_dir / "redacted.png"
-        # Try using preprocessed color image so coordinates match perfectly
         preprocessed_color = Path(row["processable_image_path"]).parent / "color.jpg"
         if preprocessed_color.exists():
             redaction_source = preprocessed_color
         else:
             redaction_source = Path(row["original_file_path"])
 
-        redact_image(redaction_source, fields, redacted_path, resolved_decisions)
+        redact_start = time.perf_counter()
+        redactor = Redactor()
+        src_img = Image.open(redaction_source).convert("RGB")
+        redacted_img = redactor.redact(src_img, fields, resolved_decisions)
+        redacted_img.save(redacted_path, "PNG")
+        latency_ms = (time.perf_counter() - redact_start) * 1000.0
 
-        # Generate audit report
+        # Generate comprehensive audit report
         audit = generate_audit_report(
-            request.scan_id, row["timestamp"], row["filename"],
-            doc_type, row["document_type_confidence"],
-            context, row["pei_before"], pei_after, fields,
-            str(redacted_path),
+            scan_id=request.scan_id,
+            timestamp=row["timestamp"],
+            filename=row["filename"],
+            document_type=doc_type,
+            doc_confidence=row["document_type_confidence"],
+            context=context,
+            pei_before=row["pei_before"],
+            pei_after=pei_after,
+            fields=fields,
+            redacted_path=str(redacted_path),
+            pei_excess_before=details_before.pei_excess,
+            pei_residual_before=details_before.pei_residual,
+            pei_excess_after=details_after.pei_excess,
+            pei_residual_after=details_after.pei_residual,
+            warnings=redactor.warnings,
+            processing_latency_ms=latency_ms,
         )
 
         # Update DB

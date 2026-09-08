@@ -131,7 +131,7 @@ def _annotate_image(img_path: Path, document_type: str) -> tuple[ImageAnnotation
                         "true_value": true_value,
                         "bbox": list(current_box),
                     })
-                    print(f"  ✓ Added {field_name} = {true_value}")
+                    print(f"  [+] Added {field_name} = {true_value}")
                     current_box = None
                 else:
                     print("  Skipped (empty field_name).")

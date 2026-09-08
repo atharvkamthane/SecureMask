@@ -187,15 +187,17 @@ def _detect_photo_region(image_path: str, document_type: str = "") -> BoundingBo
 
         if candidates:
             x, y, w, h, _ = max(candidates, key=lambda f: f[4])
-            pad_x  = int(w * 0.18)
-            pad_y  = int(h * 0.22)
-            left   = int(max(0, x - pad_x))
-            top    = int(max(0, y - pad_y))
-            right  = int(min(img_w, x + w + pad_x))
+            pad_x = int(w * 0.18)
+            pad_y = int(h * 0.22)
+            left = int(max(0, x - pad_x))
+            top = int(max(0, y - pad_y))
+            right = int(min(img_w, x + w + pad_x))
             bottom = int(min(img_h, y + h + pad_y))
             box = BoundingBox(left, top, right - left, bottom - top)
 
-            return _expand_aadhaar_portrait_bbox(box, img_w, img_h)
+            if document_type == "aadhaar":
+                return _expand_aadhaar_portrait_bbox(box, img_w, img_h)
+            return box
     except Exception:
         pass
     return None
@@ -220,27 +222,28 @@ def _expand_aadhaar_portrait_bbox(face_box: BoundingBox, img_w: int, img_h: int)
 
 
 def _detect_signature_region(image_path: str, doc_type: str,
-                               img_w: int, img_h: int) -> BoundingBox:
+                             img_w: int, img_h: int) -> tuple[BoundingBox, bool]:
+    """Detect signature region. Returns (BoundingBox, is_fallback)."""
     try:
         img = cv2.imread(str(image_path))
         if img is None:
             raise ValueError('Could not read image')
         roi_y_start = int(img_h * 0.65)
-        roi         = img[roi_y_start:, :]
-        gray        = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        _, thresh   = cv2.threshold(gray, 0, 255,
-                                     cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        kernel  = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+        roi = img[roi_y_start:, :]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255,
+                                  cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
         dilated = cv2.dilate(thresh, kernel, iterations=2)
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL,
-                                        cv2.CHAIN_APPROX_SIMPLE)
-        best_box  = None
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        best_box = None
         best_score = 0.0
         roi_h, roi_w = roi.shape[:2]
         for cnt in contours:
             cx, cy, cw, ch = cv2.boundingRect(cnt)
-            aspect     = cw / max(ch, 1)
-            area_frac  = (cw * ch) / max(roi_w * roi_h, 1)
+            aspect = cw / max(ch, 1)
+            area_frac = (cw * ch) / max(roi_w * roi_h, 1)
             if cw < roi_w * 0.05 or cw > roi_w * 0.7:
                 continue
             if ch > img_h * 0.20:
@@ -257,16 +260,16 @@ def _detect_signature_region(image_path: str, doc_type: str,
             return BoundingBox(
                 int(max(0, cx - pad)), int(max(0, cy - pad)),
                 int(min(img_w, cw + pad * 2)), int(min(img_h, ch + pad * 2)),
-            )
+            ), False
     except Exception as exc:
         logger.debug('Signature detection failed: %s', exc)
 
     fallbacks = {
-        'pan':             BoundingBox(int(img_w*0.05), int(img_h*0.72), int(img_w*0.45), int(img_h*0.15)),
-        'driving_license': BoundingBox(int(img_w*0.50), int(img_h*0.70), int(img_w*0.40), int(img_h*0.15)),
+        'pan': BoundingBox(int(img_w * 0.05), int(img_h * 0.72), int(img_w * 0.45), int(img_h * 0.15)),
+        'driving_license': BoundingBox(int(img_w * 0.50), int(img_h * 0.70), int(img_w * 0.40), int(img_h * 0.15)),
     }
     return fallbacks.get(doc_type,
-        BoundingBox(int(img_w*0.05), int(img_h*0.75), int(img_w*0.4), int(img_h*0.18)))
+        BoundingBox(int(img_w * 0.05), int(img_h * 0.75), int(img_w * 0.4), int(img_h * 0.18))), True
 
 
 # ------------------------------------------------------------------
@@ -1065,11 +1068,12 @@ class FieldExtractor:
             elif schema.field_name == 'signature':
                 h = ocr_result.image_height
                 w = ocr_result.image_width
-                sig_box     = (_detect_signature_region(image_path, document_type, w, h)
-                               if image_path else
-                               BoundingBox(int(w*0.05), int(h*0.75), int(w*0.4), int(h*0.18)))
+                if image_path:
+                    sig_box, is_fallback = _detect_signature_region(image_path, document_type, w, h)
+                else:
+                    sig_box, is_fallback = BoundingBox(int(w*0.05), int(h*0.75), int(w*0.4), int(h*0.18)), True
                 value       = 'SIGNATURE_REGION'
-                confidence  = 0.65
+                confidence  = 0.50 if is_fallback else 0.85
                 method_used = 'image'
                 bbox        = sig_box
 

@@ -21,6 +21,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("SECUREMASK_SKIP_OCR_PREWARM", "1")
 
@@ -33,63 +34,105 @@ logger = logging.getLogger(__name__)
 MIN_RUNS = 100
 
 
-def _run_pipeline_once(img_path: str) -> None:
-    """Run the full SecureMask pipeline on one image (no return value needed)."""
+def _run_pipeline_once(
+    img_path: str,
+    ocr_engine: Any,
+    classifier: Any,
+    extractor: Any,
+    redactor: Any,
+) -> dict[str, float]:
+    """Run the full SecureMask pipeline on one image and return stage timings in ms."""
     from PIL import Image as PILImage
-
-    from securemask.core.classifier import DocumentClassifier
-    from securemask.core.extractor import FieldExtractor
-    from securemask.core.ocr import OCREngine
     from securemask.core.preprocessor import save_preprocessed_variants
-    from securemask.core.redactor import Redactor
-
     import tempfile
+
+    timings = {}
+
+    # 1. Preprocessing
+    t0 = time.perf_counter()
     with tempfile.TemporaryDirectory() as tmp:
         variants = save_preprocessed_variants(img_path, tmp)
         color_path = str(variants["color"])
+        timings["preprocessor_ms"] = (time.perf_counter() - t0) * 1000
 
-        ocr_engine = OCREngine()
+        # 2. OCR
+        t1 = time.perf_counter()
         ocr_result = ocr_engine.extract(img_path, preprocessed_color_path=color_path)
+        timings["ocr_ms"] = (time.perf_counter() - t1) * 1000
 
+        # 3. Classification
+        t2 = time.perf_counter()
         pil_img = PILImage.open(img_path).convert("RGB")
-        classifier = DocumentClassifier()
         cls_result = classifier.classify_with_text_fallback(pil_img, ocr_result.full_text)
+        timings["classifier_ms"] = (time.perf_counter() - t2) * 1000
 
-        extractor = FieldExtractor()
+        # 4. Field Extraction
+        t3 = time.perf_counter()
         detected = extractor.extract(ocr_result, pil_img, cls_result.document_type, img_path)
+        timings["extractor_ms"] = (time.perf_counter() - t3) * 1000
 
-        redactor = Redactor()
+        # 5. Redaction
+        t4 = time.perf_counter()
         decisions = {f.field_name: "redact" for f in detected}
         redactor.redact(pil_img, detected, decisions)
+        timings["redactor_ms"] = (time.perf_counter() - t4) * 1000
+
+    timings["total_ms"] = sum(timings.values())
+    return timings
 
 
 def _benchmark(image_paths: list[str], device_label: str) -> dict:
     """Run benchmark on a list of image paths and return timing stats."""
+    from securemask.core.classifier import DocumentClassifier
+    from securemask.core.extractor import FieldExtractor
+    from securemask.core.ocr import OCREngine
+    from securemask.core.redactor import Redactor
+
+    # Pre-instantiate singletons for benchmark
+    print("  Warming up pipeline components...")
+    ocr_engine = OCREngine()
+    classifier = DocumentClassifier()
+    extractor = FieldExtractor()
+    redactor = Redactor()
+
     latencies: list[float] = []
+    stage_breakdowns: dict[str, list[float]] = {
+        "preprocessor_ms": [],
+        "ocr_ms": [],
+        "classifier_ms": [],
+        "extractor_ms": [],
+        "redactor_ms": [],
+    }
+
     n = len(image_paths)
 
     for idx, img_path in enumerate(image_paths, 1):
         name = Path(img_path).name
         print(f"  [{idx}/{n}] {name} ... ", end="", flush=True)
 
-        start = time.perf_counter()
         try:
-            _run_pipeline_once(img_path)
+            stage_times = _run_pipeline_once(img_path, ocr_engine, classifier, extractor, redactor)
+            tot = stage_times["total_ms"]
+            latencies.append(tot)
+            for k in stage_breakdowns:
+                stage_breakdowns[k].append(stage_times.get(k, 0.0))
+            print(f"{tot:.0f} ms (ocr: {stage_times['ocr_ms']:.0f}ms)")
         except Exception as exc:
             logger.error("Latency run failed on %s: %s", name, exc)
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        latencies.append(elapsed_ms)
-        print(f"{elapsed_ms:.0f} ms")
+            print("FAILED")
 
-    arr = np.array(latencies)
+    arr = np.array(latencies) if latencies else np.array([0.0])
+    stage_means = {k: round(float(np.mean(v)), 2) for k, v in stage_breakdowns.items() if v}
+
     return {
         "device": device_label,
-        "n_images": n,
+        "n_images": len(latencies),
         "mean_ms": round(float(np.mean(arr)), 2),
         "p95_ms": round(float(np.percentile(arr, 95)), 2),
         "min_ms": round(float(np.min(arr)), 2),
         "max_ms": round(float(np.max(arr)), 2),
         "std_ms": round(float(np.std(arr)), 2),
+        "stage_breakdown_means": stage_means,
         "latencies_ms": [round(float(x), 2) for x in latencies],
     }
 
@@ -97,17 +140,20 @@ def _benchmark(image_paths: list[str], device_label: str) -> dict:
 def run_latency_eval(
     test_set: list[ImageAnnotation],
     output_dir: Path,
+    min_runs: int = 25,
 ) -> dict:
     """Run E7 evaluation and return results dict."""
     import torch
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect image paths, repeat if needed
+    # Collect image paths, repeat or slice to min_runs
     image_paths = [ann.image_path for ann in test_set]
-    if len(image_paths) < MIN_RUNS:
-        repeats = (MIN_RUNS // len(image_paths)) + 1
-        image_paths = (image_paths * repeats)[:MIN_RUNS]
+    if len(image_paths) < min_runs:
+        repeats = (min_runs // len(image_paths)) + 1
+        image_paths = (image_paths * repeats)[:min_runs]
+    else:
+        image_paths = image_paths[:min_runs]
 
     # --- CPU run ---
     print(f"\n{'='*60}")
@@ -166,6 +212,8 @@ def main(argv: list[str] | None = None) -> None:
                         help="Directory with annotated test images")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="Output directory (default: <test-dir>/eval_results)")
+    parser.add_argument("--runs", type=int, default=25,
+                        help="Number of iterations to run (default: 25)")
     args = parser.parse_args(argv)
 
     test_set = load_test_set(args.test_dir)
@@ -174,7 +222,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     output_dir = args.output_dir or (args.test_dir / "eval_results")
-    run_latency_eval(test_set, output_dir)
+    run_latency_eval(test_set, output_dir, min_runs=args.runs)
 
 
 if __name__ == "__main__":

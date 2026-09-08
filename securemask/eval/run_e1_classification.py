@@ -81,7 +81,7 @@ def run_classification_eval(
         true_label = ann.true_document_type
         y_true.append(true_label)
         y_pred.append(predicted)
-        match = "✓" if predicted == true_label else "✗"
+        match = "[OK]" if predicted == true_label else "[X]"
         print(f"{predicted} (true={true_label}) {match}")
 
         per_image.append({

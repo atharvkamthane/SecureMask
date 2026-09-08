@@ -138,7 +138,8 @@ def run_ocr_fallback_eval(
             if cls_correct:
                 engine_correct[engine]["correct"] += 1
 
-        print(f"engine={engine}, words={word_count}, cls={'✓' if cls_correct else '✗'}, "
+        cls_str = "[OK]" if cls_correct else "[X]"
+        print(f"engine={engine}, words={word_count}, cls={cls_str}, "
               f"fields={fields_correct}/{fields_total}")
 
         per_image.append({

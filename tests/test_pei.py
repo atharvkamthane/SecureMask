@@ -277,3 +277,48 @@ class TestPEIExplainabilityAndRatios:
         assert details.pei_residual == pytest.approx(9.26, abs=0.1)
         assert details.pei == 31.5
         assert details.lambda_param == 0.50
+
+
+class TestPEIEdgeCasesAndRobustness:
+    def test_duplicate_fields_handled_deterministically(self):
+        f1 = _make_field("pan_number", weight=5)
+        f2 = _make_field("pan_number", weight=5)
+        nec = {"pan_number": True}
+        details = compute_pei_details([f1, f2], nec)
+        # Deduplication retains single PAN: total_capacity = 5.0
+        assert details.total_capacity == 5.0
+        assert details.raw_residual == 2.5
+        assert details.pei == 50.0
+
+    def test_negative_and_zero_weights_clamped(self):
+        f_neg = _make_field("glitched_field", weight=-5)
+        f_zero = _make_field("zero_field", weight=0)
+        nec = {"glitched_field": False, "zero_field": False}
+        details = compute_pei_details([f_neg, f_zero], nec)
+        assert details.total_capacity == 0.0
+        assert details.pei == 0.0
+
+    def test_unknown_redaction_decision_defaults_to_allow(self):
+        f = _make_field("phone", weight=3)
+        nec = {"phone": False}
+        # Unknown/malformed decision string "invalid_action"
+        details = compute_pei_details([f], nec, {"phone": "invalid_action"})
+        # Conservatively treated as exposed (1.0)
+        assert details.raw_excess == 3.0
+        assert details.pei == 100.0
+
+    def test_missing_necessity_key_defaults_to_excess(self):
+        f = _make_field("unmapped_attr", weight=4)
+        # Empty necessity dictionary: unmapped_attr is not listed
+        details = compute_pei_details([f], {})
+        # Defaults to unnecessary/excess
+        assert details.raw_excess == 4.0
+        assert details.pei == 100.0
+
+    def test_negative_lambda_clamped_to_zero(self):
+        f = _make_field("pan_number", weight=5)
+        nec = {"pan_number": True}
+        details = compute_pei_details([f], nec, lambda_param=-0.5)
+        assert details.lambda_param == 0.0
+        assert details.raw_residual == 0.0
+        assert details.pei == 0.0

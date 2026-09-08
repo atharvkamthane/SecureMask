@@ -71,7 +71,7 @@ _KEYWORD_SETS = {
             "election commission", "elector", "voter id", "epic",
             "photo identity card", "assembly constituency",
             "electoral roll", "polling station", "part no",
-            "chief electoral officer", "epic no",
+            "chief electoral officer",
         ],
         "patterns": [r"[A-Z]{3}\d{7}"],
     },
@@ -79,31 +79,35 @@ _KEYWORD_SETS = {
 
 
 def _keyword_classify(text: str) -> ClassificationResult:
-    """Fallback classifier using keyword + pattern matching."""
+    """Fallback classifier using keyword + pattern matching with calibrated confidence."""
     text_lower = text.lower()
     scores: dict[str, float] = {}
 
     for doc_type, data in _KEYWORD_SETS.items():
-        score = 0.0
-        for kw in data["keywords"]:
-            if kw.lower() in text_lower:
-                score += 1.0
-        for pattern in data["patterns"]:
-            if re.search(pattern, text, re.IGNORECASE):
-                score += 2.0
-        total = len(data["keywords"]) + len(data["patterns"]) * 2
-        scores[doc_type] = score / total if total > 0 else 0.0
+        kw_hits = sum(1 for kw in data["keywords"] if kw.lower() in text_lower)
+        pattern_hits = sum(1 for pattern in data["patterns"] if re.search(pattern, text, re.IGNORECASE))
 
-    if not scores:
+        if kw_hits == 0 and pattern_hits == 0:
+            scores[doc_type] = 0.0
+            continue
+
+        # Calibrate confidence: pattern match carries strong diagnostic signal
+        pattern_conf = min(0.60, pattern_hits * 0.35)
+        kw_conf = min(0.40, kw_hits * 0.12)
+        total_conf = pattern_conf + kw_conf
+        scores[doc_type] = min(1.0, total_conf)
+
+    if not scores or max(scores.values()) == 0.0:
         return ClassificationResult("unknown", 0.0, {})
 
     best_type = max(scores, key=scores.get)
     best_conf = scores[best_type]
 
-    if best_conf < 0.10:
+    # Rejection threshold for keyword classification
+    if best_conf < 0.20:
         return ClassificationResult("unknown", best_conf, scores)
 
-    return ClassificationResult(best_type, best_conf, scores)
+    return ClassificationResult(best_type, round(best_conf, 3), scores)
 
 
 # ---------------------------------------------------------------------------
@@ -177,32 +181,32 @@ class DocumentClassifier:
             if conf < 0.55:
                 label = "unknown"
 
-            return ClassificationResult(document_type=label, confidence=conf, all_probs=all_probs)
+            return ClassificationResult(document_type=label, confidence=round(conf, 3), all_probs=all_probs)
 
         except Exception as exc:
             logger.error("CNN classification failed: %s", exc)
             return ClassificationResult("unknown", 0.0, {})
 
     def classify_with_text_fallback(self, image: Image.Image, ocr_text: str) -> ClassificationResult:
-        """Classify using CNN first; if result is 'unknown', always also try keyword fallback.
+        """Classify using CNN first; if result is uncertain (<0.65) or unknown, utilize keyword fallback.
 
-        The keyword classifier is now always run when CNN confidence is below 0.65,
-        even if the CNN didn't return 'unknown', to catch borderline misclassifications.
+        If CNN is uncertain and the keyword classifier has strong diagnostic signal
+        (confidence >= 0.45 with distinct class), keyword evidence takes precedence.
         """
         cnn_result = self.classify(image)
 
-        # Always run keyword if CNN is uncertain or unknown
+        # Trigger keyword classification if CNN is unknown or uncertain
         if cnn_result.document_type == "unknown" or cnn_result.confidence < 0.65:
             kw_result = _keyword_classify(ocr_text)
-            # Prefer keyword result if it's more confident or CNN was unknown
             if kw_result.document_type != "unknown":
                 if cnn_result.document_type == "unknown":
-                    logger.info("Classifier: CNN unknown → keyword fallback → %s (%.2f)",
+                    logger.info("Classifier: CNN unknown → keyword fallback → %s (conf=%.2f)",
                                 kw_result.document_type, kw_result.confidence)
                     return kw_result
-                if kw_result.confidence > cnn_result.confidence:
-                    logger.info("Classifier: keyword overrides CNN (%s > %s)",
-                                kw_result.document_type, cnn_result.document_type)
+                # If CNN was borderline and keyword classifier has strong confidence
+                if kw_result.confidence >= 0.45 and kw_result.document_type != cnn_result.document_type:
+                    logger.info("Classifier: strong keyword match overrides uncertain CNN (%s [%.2f] > %s [%.2f])",
+                                kw_result.document_type, kw_result.confidence, cnn_result.document_type, cnn_result.confidence)
                     return kw_result
 
         return cnn_result

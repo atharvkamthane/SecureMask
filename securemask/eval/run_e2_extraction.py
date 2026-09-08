@@ -189,7 +189,7 @@ def run_extraction_eval(
     print(f"Headline match mode: normalized (whitespace-stripped, case-insensitive)")
     print(f"Average F1 (normalized): {avg_norm:.4f}")
     if modes_differ:
-        print(f"Average F1 (strict):     {avg_strict:.4f}  ← differs from normalized")
+        print(f"Average F1 (strict):     {avg_strict:.4f}  <- differs from normalized")
 
     print(f"\n{'DocType':<18} {'Field':<22} {'Prec':>8} {'Rec':>8} {'F1':>8} {'BBoxIoU':>8}")
     print("-" * 74)

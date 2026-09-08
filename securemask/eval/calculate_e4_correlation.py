@@ -2,7 +2,9 @@
 
 Loads human ratings from E4_Human_Rating_Sheet.csv (mean per scenario) and
 calculated PEI scores from e4_pei_scores.json, then calculates Pearson r,
-Spearman rho, and their associated p-values.
+Spearman rho, associated p-values, and 95% bootstrap confidence intervals.
+
+Uses exclusively the actual N=3 human rater data.
 
 Usage::
     python -m securemask.eval.calculate_e4_correlation [--csv <path>] [--json <path>]
@@ -15,6 +17,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
 
@@ -44,6 +47,39 @@ def load_pei_scores(json_path: Path) -> dict[str, float]:
     """Load PEI scores from e4_pei_scores.json."""
     data = json.loads(json_path.read_text(encoding="utf-8"))
     return {entry["scenario_id"]: float(entry["pei_score"]) for entry in data}
+
+
+def compute_bootstrap_ci(
+    x: list[float],
+    y: list[float],
+    n_bootstraps: int = 2000,
+    alpha: float = 0.05,
+    seed: int = 42,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Compute 95% bootstrap confidence intervals for Pearson r and Spearman rho."""
+    rng = np.random.RandomState(seed)
+    n = len(x)
+    r_boots: list[float] = []
+    rho_boots: list[float] = []
+
+    for _ in range(n_bootstraps):
+        idx = rng.choice(n, size=n, replace=True)
+        xb = [x[i] for i in idx]
+        yb = [y[i] for i in idx]
+        if len(set(xb)) <= 1 or len(set(yb)) <= 1:
+            continue
+        try:
+            rb, _ = pearsonr(xb, yb)
+            rhob, _ = spearmanr(xb, yb)
+            if not np.isnan(rb) and not np.isnan(rhob):
+                r_boots.append(float(rb))
+                rho_boots.append(float(rhob))
+        except Exception:
+            continue
+
+    r_low, r_high = np.percentile(r_boots, [100 * (alpha / 2), 100 * (1 - alpha / 2)])
+    rho_low, rho_high = np.percentile(rho_boots, [100 * (alpha / 2), 100 * (1 - alpha / 2)])
+    return (float(r_low), float(r_high)), (float(rho_low), float(rho_high))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -95,15 +131,16 @@ def main(argv: list[str] | None = None) -> None:
 
     r, p_val_r = pearsonr(human_vec, pei_vec)
     rho, p_val_rho = spearmanr(human_vec, pei_vec)
+    (r_ci_low, r_ci_high), (rho_ci_low, rho_ci_high) = compute_bootstrap_ci(human_vec, pei_vec)
 
     print("-" * 65)
-    print("\nE4 Correlation Results:")
-    print("=" * 45)
-    print(f"Pearson correlation (r):    {r:.4f}")
+    print("\nE4 Pilot Human-Validation Correlation Results (N=3 Real Raters):")
+    print("=" * 65)
+    print(f"Pearson correlation (r):    {r:.4f}  (95% CI: [{r_ci_low:.4f}, {r_ci_high:.4f}])")
     print(f"Pearson p-value:            {p_val_r:.4e}")
-    print(f"Spearman correlation (rho): {rho:.4f}")
+    print(f"Spearman correlation (rho): {rho:.4f}  (95% CI: [{rho_ci_low:.4f}, {rho_ci_high:.4f}])")
     print(f"Spearman p-value:          {p_val_rho:.4e}")
-    print("=" * 45)
+    print("=" * 65)
 
 
 if __name__ == "__main__":
